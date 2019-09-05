@@ -2,17 +2,13 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Semaphore implementation exposed to Go.
-// Intended use is provide a sleep and wakeup
-// primitive that can be used in the contended case
-// of other synchronization primitives.
-// Thus it targets the same goal as Linux's futex,
-// but it has much simpler semantics.
+// Go 中的信号量实现
+// 旨在提供一个 sleep 和 wakeup 原语，并用于竞争情况下的同步原语
+// 因此目标与 linux 的 futex 一样，但语义更加简单
 //
-// That is, don't think of these as semaphores.
-// Think of them as a way to implement sleep and wakeup
-// such that every sleep is paired with a single wakeup,
-// even if, due to races, the wakeup happens before the sleep.
+// 因此不要将其视为信号量
+// 将其视为 sleep 和 wakeup 的一种实现, 使每个 sleep 都有一个唯一的 wakeup 配对
+// 即使如此，由于竞争的存在 wakeup happens before sleep
 //
 // See Mullender and Cox, ``Semaphores in Plan 9,''
 // https://swtch.com/semaphore.pdf
@@ -25,18 +21,14 @@ import (
 	"unsafe"
 )
 
-// Asynchronous semaphore for sync.Mutex.
-
-// A semaRoot holds a balanced tree of sudog with distinct addresses (s.elem).
-// Each of those sudog may in turn point (through s.waitlink) to a list
-// of other sudogs waiting on the same address.
-// The operations on the inner lists of sudogs with the same address
-// are all O(1). The scanning of the top-level semaRoot list is O(log n),
-// where n is the number of distinct addresses with goroutines blocked
-// on them that hash to the given semaRoot.
-// See golang.org/issue/17953 for a program that worked badly
-// before we introduced the second level of list, and test/locklinear.go
-// for a test that exercises this.
+// sync.Mutex 的异步信号量
+// semaRoot 包含一个具有不同地址（s.elem）的平衡的 sudog 树。
+// 每个 sudog 可以反过来（通过 s.waitlink）指向其他在相同地址上等待的 sudog 的列表
+// sudog 内部列表上的操作都是 O(1)。
+// 最顶端 semaRoot 列表的扫描是 O(log n)，
+// n 是阻塞了 goroutine 的不同地址的数量，这些地址散列到给定的 semaRoot。
+// 请参阅 golang.org/issue/17953 以获取一个效果不佳的程序
+// 在我们介绍第二级列表之前，test/locklinear.go 用于执行此操作的测试。
 type semaRoot struct {
 	lock  mutex
 	treap *sudog // root of balanced tree of unique waiters.
@@ -53,22 +45,22 @@ var semtable [semTabSize]struct {
 
 //go:linkname sync_runtime_Semacquire sync.runtime_Semacquire
 func sync_runtime_Semacquire(addr *uint32) {
-	semacquire1(addr, false, semaBlockProfile)
+	semacquire1(addr, false, semaBlockProfile, 0)
 }
 
 //go:linkname poll_runtime_Semacquire internal/poll.runtime_Semacquire
 func poll_runtime_Semacquire(addr *uint32) {
-	semacquire1(addr, false, semaBlockProfile)
+	semacquire1(addr, false, semaBlockProfile, 0)
 }
 
-//go:linkname sync_runtime_Semrelease sync.runtime_Semrelease
-func sync_runtime_Semrelease(addr *uint32, handoff bool) {
-	semrelease1(addr, handoff)
+//go:linkname sync_runtime_Semrelease sync.goparkunlock
+func sync_runtime_Semrelease(addr *uint32, handoff bool, skipframes int) {
+	semrelease1(addr, handoff, skipframes)
 }
 
 //go:linkname sync_runtime_SemacquireMutex sync.runtime_SemacquireMutex
-func sync_runtime_SemacquireMutex(addr *uint32, lifo bool) {
-	semacquire1(addr, lifo, semaBlockProfile|semaMutexProfile)
+func sync_runtime_SemacquireMutex(addr *uint32, lifo bool, skipframes int) {
+	semacquire1(addr, lifo, semaBlockProfile|semaMutexProfile, skipframes)
 }
 
 //go:linkname poll_runtime_Semrelease internal/poll.runtime_Semrelease
@@ -92,10 +84,10 @@ const (
 
 // 从运行时调用
 func semacquire(addr *uint32) {
-	semacquire1(addr, false, 0)
+	semacquire1(addr, false, 0, 0)
 }
 
-func semacquire1(addr *uint32, lifo bool, profile semaProfileFlags) {
+func semacquire1(addr *uint32, lifo bool, profile semaProfileFlags, skipframes int) {
 	// 获取当前 goroutine
 	// 该调用发生在 goroutine 运行时，所以有绑定的 P
 	gp := getg()
@@ -143,22 +135,22 @@ func semacquire1(addr *uint32, lifo bool, profile semaProfileFlags) {
 		// Any semrelease after the cansemacquire knows we're waiting
 		// (we set nwait above), so go to sleep.
 		root.queue(addr, s, lifo)
-		goparkunlock(&root.lock, waitReasonSemacquire, traceEvGoBlockSync, 4)
+		goparkunlock(&root.lock, waitReasonSemacquire, traceEvGoBlockSync, 4+skipframes)
 		if s.ticket != 0 || cansemacquire(addr) {
 			break
 		}
 	}
 	if s.releasetime > 0 {
-		blockevent(s.releasetime-t0, 3)
+		blockevent(s.releasetime-t0, 3+skipframes)
 	}
 	releaseSudog(s)
 }
 
 func semrelease(addr *uint32) {
-	semrelease1(addr, false)
+	semrelease1(addr, false, 0)
 }
 
-func semrelease1(addr *uint32, handoff bool) {
+func semrelease1(addr *uint32, handoff bool, skipframes int) {
 	root := semroot(addr)
 	atomic.Xadd(addr, 1)
 
@@ -185,7 +177,7 @@ func semrelease1(addr *uint32, handoff bool) {
 	if s != nil { // May be slow, so unlock first
 		acquiretime := s.acquiretime
 		if acquiretime != 0 {
-			mutexevent(t0-acquiretime, 3)
+			mutexevent(t0-acquiretime, 3+skipframes)
 		}
 		if s.ticket != 0 {
 			throw("corrupted semaphore ticket")
@@ -193,7 +185,7 @@ func semrelease1(addr *uint32, handoff bool) {
 		if handoff && cansemacquire(addr) {
 			s.ticket = 1
 		}
-		readyWithTime(s, 5)
+		readyWithTime(s, 5+skipframes)
 	}
 }
 
@@ -201,26 +193,21 @@ func semroot(addr *uint32) *semaRoot {
 	return &semtable[(uintptr(unsafe.Pointer(addr))>>3)%semTabSize].root
 }
 
+// *addr -= 1
 func cansemacquire(addr *uint32) bool {
-	// cas 算法
 	for {
-
 		v := atomic.Load(addr)
-		// 如果地址中的值为 0 则不能处理，即保证不为负
 		if v == 0 {
 			return false
 		}
-
-		// 比较并执行减一，如果成功则返回 true
 		if atomic.Cas(addr, v, v-1) {
 			return true
 		}
-
-		// 否则继续 acquire
 	}
 }
 
 // queue adds s to the blocked goroutines in semaRoot.
+// treap.insert(s)
 func (root *semaRoot) queue(addr *uint32, s *sudog, lifo bool) {
 	s.g = getg()
 	s.elem = unsafe.Pointer(addr)

@@ -42,10 +42,11 @@ type sweepdata struct {
 	npausesweep uint32
 }
 
-// finishsweep_m ensures that all spans are swept.
+// finishsweep_m 确保所有的 span 都已经被清除.
 //
 // The world must be stopped. This ensures there are no sweeps in
 // progress.
+// 此时必须 STW。这确保了不会有其他的 sweeper 正在进行
 //
 //go:nowritebarrier
 func finishsweep_m() {
@@ -98,6 +99,7 @@ func sweepone() uintptr {
 
 	// increment locks to ensure that the goroutine is not preempted
 	// in the middle of sweep thus leaving the span in an inconsistent state for next GC
+	// 增加锁的数量确保 goroutine 在 sweep 中不会被抢占，进而不会将 span 留到下个 GC 产生不一致
 	_g_.m.locks++
 	if atomic.Load(&mheap_.sweepdone) != 0 {
 		_g_.m.locks--
@@ -111,9 +113,11 @@ func sweepone() uintptr {
 	for {
 		s = mheap_.sweepSpans[1-sg/2%2].pop()
 		if s == nil {
+			// 清扫完毕，退出
 			atomic.Store(&mheap_.sweepdone, 1)
 			break
 		}
+
 		if s.state != mSpanInUse {
 			// This can happen if direct sweeping already
 			// swept this span, but in that case the sweep
@@ -157,12 +161,10 @@ func sweepone() uintptr {
 	return npages
 }
 
-// isSweepDone reports whether all spans are swept or currently being swept.
-//
-// Note that this condition may transition from false to true at any
-// time as the sweeper runs. It may transition from true to false if a
-// GC runs; to prevent that the caller must be non-preemptible or must
-// somehow block GC progress.
+// isSweepDone 报告是否所有 span 已经清扫或当前正在清扫。
+// 请注意，此条件可能会在清扫器运行期间任何情况下从 false 转换为 true。
+// 如果当 GC 执行时，它可能会从 true 转换为 false;
+// 防止调用者必为不可抢占的或必须以某种方式阻止 GC 进行。
 func isSweepDone() bool {
 	return mheap_.sweepdone != 0
 }
@@ -201,8 +203,7 @@ func (s *mspan) ensureSwept() {
 // Sweep frees or collects finalizers for blocks not marked in the mark phase.
 // It clears the mark bits in preparation for the next GC round.
 // Returns true if the span was returned to heap.
-// If preserve=true, don't return it to heap nor relink in mcentral lists;
-// caller takes care of it.
+// 如果 preserve= true，则不归还到 heap 或者重新链接到 mcentral 列表，调用方负责进行后续处理
 //TODO go:nowritebarrier
 func (s *mspan) sweep(preserve bool) bool {
 	// It's critical that we enter this function with preemption disabled,
@@ -291,7 +292,7 @@ func (s *mspan) sweep(preserve bool) bool {
 		}
 	}
 
-	if debug.allocfreetrace != 0 || raceenabled || msanenabled {
+	if debug.allocfreetrace != 0 || debug.clobberfree != 0 || raceenabled || msanenabled {
 		// Find all newly freed objects. This doesn't have to
 		// efficient; allocfreetrace has massive overhead.
 		mbits := s.markBitsForBase()
@@ -301,6 +302,9 @@ func (s *mspan) sweep(preserve bool) bool {
 				x := s.base() + i*s.elemsize
 				if debug.allocfreetrace != 0 {
 					tracefree(unsafe.Pointer(x), size)
+				}
+				if debug.clobberfree != 0 {
+					clobberfree(unsafe.Pointer(x), size)
 				}
 				if raceenabled {
 					racefree(unsafe.Pointer(x), size)
@@ -444,5 +448,14 @@ retry:
 
 	if trace.enabled {
 		traceGCSweepDone()
+	}
+}
+
+// clobberfree sets the memory content at x to bad content, for debugging
+// purposes.
+func clobberfree(x unsafe.Pointer, size uintptr) {
+	// size (span.elemsize) is always a multiple of 4.
+	for i := uintptr(0); i < size; i += 4 {
+		*(*uint32)(add(x, i)) = 0xdeadbeef
 	}
 }

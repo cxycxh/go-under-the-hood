@@ -158,6 +158,17 @@ TEXT runtime·raiseproc(SB),NOSPLIT,$0
 	SYSCALL
 	RET
 
+TEXT runtime·pipe_trampoline(SB),NOSPLIT,$0
+	PUSHQ	BP
+	MOVQ	SP, BP
+	CALL	libc_pipe(SB)		// pointer already in DI
+	TESTL	AX, AX
+	JEQ	3(PC)
+	CALL	libc_error(SB)		// return negative errno value
+	NEGL	AX
+	POPQ	BP
+	RET
+
 TEXT runtime·setitimer(SB),NOSPLIT,$0-24
 	MOVL	mode+0(FP), DI
 	MOVQ	new+8(FP), SI
@@ -604,10 +615,8 @@ TEXT runtime·sigaltstack(SB),NOSPLIT,$-8
 // set tls base to DI
 TEXT runtime·settls(SB),NOSPLIT,$32
 #ifdef GOOS_android
-	// Same as in sys_darwin_386.s:/ugliness, different constant.
-	// DI currently holds m->tls, which must be fs:0x1d0.
-	// See cgo/gcc_android_amd64.c for the derivation of the constant.
-	SUBQ	$0x1d0, DI  // In android, the tls base
+	// Android stores the TLS offset in runtime·tls_g.
+	SUBQ	runtime·tls_g(SB), DI
 #else
 	ADDQ	$8, DI	// ELF wants to use -8(FS)
 #endif

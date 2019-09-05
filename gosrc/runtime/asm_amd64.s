@@ -131,9 +131,24 @@ nocpuinfo:
 	MOVQ	_cgo_init(SB), AX
 	TESTQ	AX, AX
 	JZ	needtls
-	// g0 已经存在 DI 中
-	MOVQ	DI, CX	// Win64 使用 CX 来表示第一个参数
-	MOVQ	$setg_gcc<>(SB), SI
+	// arg 1: g0 已经存在 DI 中
+	MOVQ	$setg_gcc<>(SB), SI // arg 2: setg_gcc
+#ifdef GOOS_android
+	MOVQ	$runtime·tls_g(SB), DX 	// arg 3: &tls_g
+	// arg 4: TLS base, stored in slot 0 (Android's TLS_SLOT_SELF).
+	// Compensate for tls_g (+16).
+	MOVQ	-16(TLS), CX
+#else
+	MOVQ	$0, DX	// arg 3, 4: not used when using platform's TLS
+	MOVQ	$0, CX
+#endif
+#ifdef GOOS_windows
+	// Adjust for the Win64 calling convention.
+	MOVQ	CX, R9 // arg 4
+	MOVQ	DX, R8 // arg 3
+	MOVQ	SI, DX // arg 2
+	MOVQ	DI, CX // arg 1
+#endif
 	CALL	AX
 
 	// _cgo_init 后更新 stackguard
@@ -153,6 +168,10 @@ needtls:
 #endif
 #ifdef GOOS_solaris
 	// 跳过 TLS 设置 on Solaris
+	JMP ok
+#endif
+#ifdef GOOS_illumos
+	// skip TLS setup on illumos
 	JMP ok
 #endif
 #ifdef GOOS_darwin
@@ -376,17 +395,17 @@ bad:
 
 
 /*
- * support for morestack
+ * 支持栈扩张
  */
 
-// Called during function prolog when more stack is needed.
+// 当需要更多栈空间时候，在函数序言期间调用
 //
 // The traceback routines see morestack on a g0 as being
 // the top of a stack (for example, morestack calling newstack
 // calling the scheduler calling newm calling gc), so we must
 // record an argument size. For that purpose, it has no arguments.
 TEXT runtime·morestack(SB),NOSPLIT,$0-0
-	// Cannot grow scheduler stack (m->g0).
+	// 无法增长调度器的栈(m->g0)
 	get_tls(CX)
 	MOVQ	g(CX), BX
 	MOVQ	g_m(BX), BX
@@ -396,38 +415,39 @@ TEXT runtime·morestack(SB),NOSPLIT,$0-0
 	CALL	runtime·badmorestackg0(SB)
 	CALL	runtime·abort(SB)
 
-	// Cannot grow signal stack (m->gsignal).
+	// 无法增长信号栈 (m->gsignal)
 	MOVQ	m_gsignal(BX), SI
 	CMPQ	g(CX), SI
 	JNE	3(PC)
 	CALL	runtime·badmorestackgsignal(SB)
 	CALL	runtime·abort(SB)
 
-	// Called from f.
-	// Set m->morebuf to f's caller.
-	MOVQ	8(SP), AX	// f's caller's PC
+	// 从 f 调用
+	// 将 m->morebuf 设置为 f 的调用方
+	NOP		SP	// tell vet SP changed - stop checking offsets
+	MOVQ	8(SP), AX	// f 的调用方 PC
 	MOVQ	AX, (m_morebuf+gobuf_pc)(BX)
-	LEAQ	16(SP), AX	// f's caller's SP
+	LEAQ	16(SP), AX	// f 的调用方 SP
 	MOVQ	AX, (m_morebuf+gobuf_sp)(BX)
 	get_tls(CX)
 	MOVQ	g(CX), SI
 	MOVQ	SI, (m_morebuf+gobuf_g)(BX)
 
-	// Set g->sched to context in f.
-	MOVQ	0(SP), AX // f's PC
+	// 将 g->sched 设置为 f 的 context
+	MOVQ	0(SP), AX // f 的 PC
 	MOVQ	AX, (g_sched+gobuf_pc)(SI)
 	MOVQ	SI, (g_sched+gobuf_g)(SI)
-	LEAQ	8(SP), AX // f's SP
+	LEAQ	8(SP), AX // f 的 SP
 	MOVQ	AX, (g_sched+gobuf_sp)(SI)
 	MOVQ	BP, (g_sched+gobuf_bp)(SI)
 	MOVQ	DX, (g_sched+gobuf_ctxt)(SI)
 
-	// Call newstack on m->g0's stack.
+	// 在 m->g0 栈上调用 newstack.
 	MOVQ	m_g0(BX), BX
 	MOVQ	BX, g(CX)
 	MOVQ	(g_sched+gobuf_sp)(BX), SP
 	CALL	runtime·newstack(SB)
-	CALL	runtime·abort(SB)	// crash if newstack returns
+	CALL	runtime·abort(SB)	// 如果 newstack 返回则崩溃
 	RET
 
 // morestack but not preserving ctxt.
@@ -802,7 +822,7 @@ havem:
 	RET
 
 // func setg(gg *g)
-// set g. for use by needm.
+// 设置 g. 供 needm 使用
 TEXT runtime·setg(SB), NOSPLIT, $0-8
 	MOVQ	gg+0(FP), BX
 #ifdef GOOS_windows
@@ -863,7 +883,7 @@ TEXT runtime·aeshash(SB),NOSPLIT,$0-32
 	MOVQ	p+0(FP), AX	// ptr to data
 	MOVQ	s+16(FP), CX	// size
 	LEAQ	ret+24(FP), DX
-	JMP	runtime·aeshashbody(SB)
+	JMP		aeshashbody<>(SB)
 
 // func aeshashstr(p unsafe.Pointer, h uintptr) uintptr
 TEXT runtime·aeshashstr(SB),NOSPLIT,$0-24
@@ -871,12 +891,12 @@ TEXT runtime·aeshashstr(SB),NOSPLIT,$0-24
 	MOVQ	8(AX), CX	// length of string
 	MOVQ	(AX), AX	// string data
 	LEAQ	ret+16(FP), DX
-	JMP	runtime·aeshashbody(SB)
+	JMP		aeshashbody<>(SB)
 
 // AX: data
 // CX: length
 // DX: address to put return value
-TEXT runtime·aeshashbody(SB),NOSPLIT,$0-0
+TEXT aeshashbody<>(SB),NOSPLIT,$0-0
 	// Fill an SSE register with our seeds.
 	MOVQ	h+8(FP), X0			// 64 bits of per-table hash seed
 	PINSRW	$4, CX, X0			// 16 bits of length
@@ -1340,67 +1360,57 @@ TEXT runtime·addmoduledata(SB),NOSPLIT,$0-0
 	POPQ	R15
 	RET
 
-// gcWriteBarrier performs a heap pointer write and informs the GC.
+// gcWriteBarrier 执行一个堆指针的写入并通知 GC。
 //
-// gcWriteBarrier does NOT follow the Go ABI. It takes two arguments:
-// - DI is the destination of the write
-// - AX is the value being written at DI
-// It clobbers FLAGS. It does not clobber any general-purpose registers,
-// but may clobber others (e.g., SSE registers).
+// gcWriteBarrier 不遵循 Go ABI，它接受两个参数：
+// - DI 是写操作的目标地址
+// - AX 是需要写入 DI 的值
+// 它会 clobber FLAGS。但不会 clobber 其他通用寄存器，但会 clobber 其他寄存器（比如 SSE 寄存器）
 TEXT runtime·gcWriteBarrier(SB),NOSPLIT,$120
-	// Save the registers clobbered by the fast path. This is slightly
-	// faster than having the caller spill these.
+	// 通过快速路径保存被 clobber 的寄存器。
+	// 它比调用方 spill 这些寄存器稍快一些
 	MOVQ	R14, 104(SP)
 	MOVQ	R13, 112(SP)
-	// TODO: Consider passing g.m.p in as an argument so they can be shared
-	// across a sequence of write barriers.
+	// TODO: 考虑传递 g.m.p 作为参数，从而可以他们可以在写屏障的一个序列之间进行共享
 	get_tls(R13)
 	MOVQ	g(R13), R13
 	MOVQ	g_m(R13), R13
 	MOVQ	m_p(R13), R13
 	MOVQ	(p_wbBuf+wbBuf_next)(R13), R14
-	// Increment wbBuf.next position.
+	// 增加 wbBuf.next 的位置.
 	LEAQ	16(R14), R14
 	MOVQ	R14, (p_wbBuf+wbBuf_next)(R13)
 	CMPQ	R14, (p_wbBuf+wbBuf_end)(R13)
-	// Record the write.
-	MOVQ	AX, -16(R14)	// Record value
-	// Note: This turns bad pointer writes into bad
-	// pointer reads, which could be confusing. We could avoid
-	// reading from obviously bad pointers, which would
-	// take care of the vast majority of these. We could
-	// patch this up in the signal handler, or use XCHG to
-	// combine the read and the write.
+	// 记录写操作
+	MOVQ	AX, -16(R14)	// 记录值
+	// 注意：这会将错误的指针写入错误的指针读取，从而可能会令人困惑。
+	// 我们可以避免从明显不好的指针中读取，这些指针会照顾绝大多数指针。
+	// 我们还可以在信号处理程序中对其进行修补，或者使用 XCHG 来组合读取和写入。
 	MOVQ	(DI), R13
-	MOVQ	R13, -8(R14)	// Record *slot
-	// Is the buffer full? (flags set in CMPQ above)
+	MOVQ	R13, -8(R14)	// 记录 *slot
+	// 缓存是否已满? (上面的 CMPQ 设置了 flags)
 	JEQ	flush
 ret:
 	MOVQ	104(SP), R14
 	MOVQ	112(SP), R13
-	// Do the write.
+	// 执行写入
 	MOVQ	AX, (DI)
 	RET
 
 flush:
-	// Save all general purpose registers since these could be
-	// clobbered by wbBufFlush and were not saved by the caller.
-	// It is possible for wbBufFlush to clobber other registers
-	// (e.g., SSE registers), but the compiler takes care of saving
-	// those in the caller if necessary. This strikes a balance
-	// with registers that are likely to be used.
+	// 保存所有通用寄存器，因为这些寄存器可能会被 wbBufFlush 破坏，并且不会被调用者保存。
+	// wbBufFlush 可能会破坏其他寄存器（例如，SSE寄存器），但编译器会在必要时负责保存调用者中的那些寄存器。
+	// 这与可能使用的寄存器达成了平衡。
 	//
-	// We don't have type information for these, but all code under
-	// here is NOSPLIT, so nothing will observe these.
+	// 我们不保存这些的类型信息，但这里的所有代码都是 NOSPLIT 的，因此不会有人观察到这些变化
 	//
-	// TODO: We could strike a different balance; e.g., saving X0
-	// and not saving GP registers that are less likely to be used.
-	MOVQ	DI, 0(SP)	// Also first argument to wbBufFlush
-	MOVQ	AX, 8(SP)	// Also second argument to wbBufFlush
+	// TODO: 我们可能 strike 一个不同的平衡，例如，保存 X0 而不保存不太可能使用的通用寄存器。
+	MOVQ	DI, 0(SP)	// 也是 wbBufFlush 的第一个参数
+	MOVQ	AX, 8(SP)	// 也是 wbBufFlush 的第二个参数
 	MOVQ	BX, 16(SP)
 	MOVQ	CX, 24(SP)
 	MOVQ	DX, 32(SP)
-	// DI already saved
+	// DI 已经保存了
 	MOVQ	SI, 40(SP)
 	MOVQ	BP, 48(SP)
 	MOVQ	R8, 56(SP)
@@ -1408,11 +1418,11 @@ flush:
 	MOVQ	R10, 72(SP)
 	MOVQ	R11, 80(SP)
 	MOVQ	R12, 88(SP)
-	// R13 already saved
-	// R14 already saved
+	// R13 已经保存了
+	// R14 已经保存了
 	MOVQ	R15, 96(SP)
 
-	// This takes arguments DI and AX
+	// 它接受 DI 和 AX 作为参数
 	CALL	runtime·wbBufFlush(SB)
 
 	MOVQ	0(SP), DI
@@ -1430,10 +1440,8 @@ flush:
 	MOVQ	96(SP), R15
 	JMP	ret
 
-DATA	debugCallFrameTooLarge<>+0x00(SB)/8, $"call fra"
-DATA	debugCallFrameTooLarge<>+0x08(SB)/8, $"me too l"
-DATA	debugCallFrameTooLarge<>+0x10(SB)/4, $"arge"
-GLOBL	debugCallFrameTooLarge<>(SB), RODATA, $0x14	// Size duplicated below
+DATA	debugCallFrameTooLarge<>+0x00(SB)/20, $"call frame too large"
+GLOBL	debugCallFrameTooLarge<>(SB), RODATA, $20	// Size duplicated below
 
 // debugCallV1 is the entry point for debugger-injected function
 // calls on running goroutines. It informs the runtime that a
@@ -1557,7 +1565,7 @@ good:
 	// The frame size is too large. Report the error.
 	MOVQ	$debugCallFrameTooLarge<>(SB), AX
 	MOVQ	AX, 0(SP)
-	MOVQ	$0x14, 8(SP)
+	MOVQ	$20, 8(SP) // length of debugCallFrameTooLarge string
 	MOVQ	$8, AX
 	BYTE	$0xcc
 	JMP	restore
@@ -1591,6 +1599,8 @@ restore:
 
 	RET
 
+// runtime.debugCallCheck assumes that functions defined with the
+// DEBUG_CALL_FN macro are safe points to inject calls.
 #define DEBUG_CALL_FN(NAME,MAXSIZE)		\
 TEXT NAME(SB),WRAPPER,$MAXSIZE-0;		\
 	NO_LOCAL_POINTERS;			\
@@ -1622,3 +1632,80 @@ TEXT runtime·debugCallPanicked(SB),NOSPLIT,$16-16
 	MOVQ	$2, AX
 	BYTE	$0xcc
 	RET
+
+ // Note: these functions use a special calling convention to save generated code space.
+// Arguments are passed in registers, but the space for those arguments are allocated
+// in the caller's stack frame. These stubs write the args into that stack space and
+// then tail call to the corresponding runtime handler.
+// The tail call makes these stubs disappear in backtraces.
+TEXT runtime·panicIndex(SB),NOSPLIT,$0-16
+	MOVQ	AX, x+0(FP)
+	MOVQ	CX, y+8(FP)
+	JMP	runtime·goPanicIndex(SB)
+TEXT runtime·panicIndexU(SB),NOSPLIT,$0-16
+	MOVQ	AX, x+0(FP)
+	MOVQ	CX, y+8(FP)
+	JMP	runtime·goPanicIndexU(SB)
+TEXT runtime·panicSliceAlen(SB),NOSPLIT,$0-16
+	MOVQ	CX, x+0(FP)
+	MOVQ	DX, y+8(FP)
+	JMP	runtime·goPanicSliceAlen(SB)
+TEXT runtime·panicSliceAlenU(SB),NOSPLIT,$0-16
+	MOVQ	CX, x+0(FP)
+	MOVQ	DX, y+8(FP)
+	JMP	runtime·goPanicSliceAlenU(SB)
+TEXT runtime·panicSliceAcap(SB),NOSPLIT,$0-16
+	MOVQ	CX, x+0(FP)
+	MOVQ	DX, y+8(FP)
+	JMP	runtime·goPanicSliceAcap(SB)
+TEXT runtime·panicSliceAcapU(SB),NOSPLIT,$0-16
+	MOVQ	CX, x+0(FP)
+	MOVQ	DX, y+8(FP)
+	JMP	runtime·goPanicSliceAcapU(SB)
+TEXT runtime·panicSliceB(SB),NOSPLIT,$0-16
+	MOVQ	AX, x+0(FP)
+	MOVQ	CX, y+8(FP)
+	JMP	runtime·goPanicSliceB(SB)
+TEXT runtime·panicSliceBU(SB),NOSPLIT,$0-16
+	MOVQ	AX, x+0(FP)
+	MOVQ	CX, y+8(FP)
+	JMP	runtime·goPanicSliceBU(SB)
+TEXT runtime·panicSlice3Alen(SB),NOSPLIT,$0-16
+	MOVQ	DX, x+0(FP)
+	MOVQ	BX, y+8(FP)
+	JMP	runtime·goPanicSlice3Alen(SB)
+TEXT runtime·panicSlice3AlenU(SB),NOSPLIT,$0-16
+	MOVQ	DX, x+0(FP)
+	MOVQ	BX, y+8(FP)
+	JMP	runtime·goPanicSlice3AlenU(SB)
+TEXT runtime·panicSlice3Acap(SB),NOSPLIT,$0-16
+	MOVQ	DX, x+0(FP)
+	MOVQ	BX, y+8(FP)
+	JMP	runtime·goPanicSlice3Acap(SB)
+TEXT runtime·panicSlice3AcapU(SB),NOSPLIT,$0-16
+	MOVQ	DX, x+0(FP)
+	MOVQ	BX, y+8(FP)
+	JMP	runtime·goPanicSlice3AcapU(SB)
+TEXT runtime·panicSlice3B(SB),NOSPLIT,$0-16
+	MOVQ	CX, x+0(FP)
+	MOVQ	DX, y+8(FP)
+	JMP	runtime·goPanicSlice3B(SB)
+TEXT runtime·panicSlice3BU(SB),NOSPLIT,$0-16
+	MOVQ	CX, x+0(FP)
+	MOVQ	DX, y+8(FP)
+	JMP	runtime·goPanicSlice3BU(SB)
+TEXT runtime·panicSlice3C(SB),NOSPLIT,$0-16
+	MOVQ	AX, x+0(FP)
+	MOVQ	CX, y+8(FP)
+	JMP	runtime·goPanicSlice3C(SB)
+TEXT runtime·panicSlice3CU(SB),NOSPLIT,$0-16
+	MOVQ	AX, x+0(FP)
+	MOVQ	CX, y+8(FP)
+	JMP	runtime·goPanicSlice3CU(SB)
+
+ #ifdef GOOS_android
+// Use the free TLS_SLOT_APP slot #2 on Android Q.
+// Earlier androids are set up in gcc_android.c.
+DATA runtime·tls_g+0(SB)/8, $16
+GLOBL runtime·tls_g+0(SB), NOPTR, $8
+#endif

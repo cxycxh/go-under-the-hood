@@ -64,33 +64,24 @@
 //
 // 5. 当用户进行了足够的分配工作后，重新从上面 1 开始。 请参阅下面有关 GC 频率的讨论。
 
-// Concurrent sweep.
+// 并发 sweep.
 //
-// The sweep phase proceeds concurrently with normal program execution.
-// The heap is swept span-by-span both lazily (when a goroutine needs another span)
-// and concurrently in a background goroutine (this helps programs that are not CPU bound).
-// At the end of STW mark termination all spans are marked as "needs sweeping".
+// sweep 阶段与正常程序执行同时进行。堆懒惰的清扫 span-by-span（当 goroutine 需要另一个 span 时）
+// 并且并发的在后台 goroutine 中扫描（这有助于不受 CPU 限制的程序）。
+// 在 STW 标记终止结束时，所有 span 都标记为“需要清扫”。
 //
-// The background sweeper goroutine simply sweeps spans one-by-one.
+// 后台 sweeper 简单的对一个个 span 进行 sweep。
 //
-// To avoid requesting more OS memory while there are unswept spans, when a
-// goroutine needs another span, it first attempts to reclaim that much memory
-// by sweeping. When a goroutine needs to allocate a new small-object span, it
-// sweeps small-object spans for the same object size until it frees at least
-// one object. When a goroutine needs to allocate large-object span from heap,
-// it sweeps spans until it frees at least that many pages into heap. There is
-// one case where this may not suffice: if a goroutine sweeps and frees two
-// nonadjacent one-page spans to the heap, it will allocate a new two-page
-// span, but there can still be other one-page unswept spans which could be
-// combined into a two-page span.
+// 为了避免在未扫描 span 时请求更多 OS 内存，当 goroutine 需要另一个 span 时，它首先尝试通过扫描来回收那么多内存。
+// 当 goroutine 需要分配一个新的小对象 span 时，它会扫描相同对象大小的小对象 span，直到它释放至少一个对象。
+// 当 goroutine 需要从堆中分配大对象 span 时，它会扫描 span，直到它将至少那么多页释放到堆中。
+// 有一种情况，这可能是不够的：如果 goroutine 扫描并释放两个不相邻的单页 span 到堆，
+// 它将分配一个新的两页 span，但仍然可以有其他单页未扫描 span 可能是合并为两页 span。
 //
-// It's critical to ensure that no operations proceed on unswept spans (that would corrupt
-// mark bits in GC bitmap). During GC all mcaches are flushed into the central cache,
-// so they are empty. When a goroutine grabs a new span into mcache, it sweeps it.
-// When a goroutine explicitly frees an object or sets a finalizer, it ensures that
-// the span is swept (either by sweeping it, or by waiting for the concurrent sweep to finish).
-// The finalizer goroutine is kicked off only when all spans are swept.
-// When the next GC starts, it sweeps all not-yet-swept spans (if any).
+// 确保在未扫描的 span 上不进行任何操作（这会破坏 GC bitmap 中的标记位）至关重要。
+// 在GC期间，所有 mcache 都被刷新到 mcentral 中，因此它们是空的。当 goroutine 抓住一个新的 span 到 mcache 时，它会扫过它。
+// 当 goroutine 显式释放对象或设置 finalizer 时，它确保扫描 span（通过扫描它，或等待并发扫描完成）。
+// 只有当所有 span 都被扫过时，finalizer goroutine 才会开始。当下一个 GC 开始时，它会扫描所有尚未扫描的 span（如果有的话）。
 
 // GC 频率
 // 下一次 GC 是在分配了与已经使用的量成比例的额外内存量之后开始。该比例由 GOGC 环境变量控制（默认为 100）。
@@ -99,12 +90,9 @@
 
 // Oblets
 //
-// In order to prevent long pauses while scanning large objects and to
-// improve parallelism, the garbage collector breaks up scan jobs for
-// objects larger than maxObletBytes into "oblets" of at most
-// maxObletBytes. When scanning encounters the beginning of a large
-// object, it scans only the first oblet and enqueues the remaining
-// oblets as new scan jobs.
+// 为了防止在扫描大对象时出现长时间暂停并提高并行性，垃圾收集器将大于m axObletBytes 的对象的扫描 work
+// 分解为最多 maxobletBytes 的 “oblets”。
+// 当扫描遇到大对象的开头时，它只扫描第一个 oblet 并将剩余的 oblet 排队为新的扫描 work。
 
 package runtime
 
@@ -119,9 +107,7 @@ const (
 	_ConcurrentSweep = true
 	_FinBlockSize    = 4 * 1024
 
-	// sweepMinHeapDistance is a lower bound on the heap distance
-	// (in bytes) reserved for concurrent sweeping between GC
-	// cycles. This will be scaled by gcpercent/100.
+	// sweepMinHeapDistance 是为 GC 周期之间的并发扫描保留的堆距离（以字节为单位）的下限。
 	sweepMinHeapDistance = 1024 * 1024
 )
 
@@ -139,10 +125,10 @@ const (
 // debugging.
 var heapminimum uint64 = defaultHeapMinimum
 
-// defaultHeapMinimum is the value of heapminimum for GOGC==100.
+// defaultHeapMinimum 是 GOGC == 100 的 heapminimum 值。
 const defaultHeapMinimum = 4 << 20
 
-// Initialized from $GOGC.  GOGC=off means no GC.
+// 从 $GOGC 初始化.  GOGC=off 表示禁用 GC.
 var gcpercent int32
 
 func gcinit() {
@@ -180,26 +166,32 @@ func readgogc() int32 {
 }
 
 // 在我们即将开始让用户代码运行之前，在大量运行时初始化之后调用 gcenable。
-// 它启动后台的 sweeper goroutine 并启用 GC。
+// 它启用了后台 sweeper goroutine，后台 scavenger goroutine，并启用了 GC
 func gcenable() {
-	c := make(chan int, 1)
+	// Kick off sweeping and scavenging.
+	c := make(chan int, 2)
 	go bgsweep(c)
+	go bgscavenge(c)
+	<-c
 	<-c
 	memstats.enablegc = true // 现在运行时已经初始化完毕了，GC 已就绪
 }
 
 //go:linkname setGCPercent runtime/debug.setGCPercent
 func setGCPercent(in int32) (out int32) {
-	lock(&mheap_.lock)
-	out = gcpercent
-	if in < 0 {
-		in = -1
-	}
-	gcpercent = in
-	heapminimum = defaultHeapMinimum * uint64(gcpercent) / 100
-	// 更新步调来响应 gcpercent 变化
-	gcSetTriggerRatio(memstats.triggerRatio)
-	unlock(&mheap_.lock)
+	// 需要获取 heap 锁，切换到系统栈
+	systemstack(func() {
+		lock(&mheap_.lock)
+		out = gcpercent
+		if in < 0 { // GC=off
+			in = -1
+		}
+		gcpercent = in
+		heapminimum = defaultHeapMinimum * uint64(gcpercent) / 100
+		// 更新步调来响应 gcpercent 变化
+		gcSetTriggerRatio(memstats.triggerRatio)
+		unlock(&mheap_.lock)
+	})
 
 	// 如果我们刚好禁用了 GC，则等待任何并发 GC 标记完成，从而我们总是能够在没有 GC 的情况下返回
 	if in < 0 {
@@ -228,14 +220,14 @@ var writeBarrier struct {
 var gcBlackenEnabled uint32
 
 const (
-	_GCoff             = iota // GC not running; sweeping in background, write barrier disabled
-	_GCmark                   // GC marking roots and workbufs: allocate black, write barrier ENABLED
-	_GCmarktermination        // GC mark termination: allocate black, P's help GC, write barrier ENABLED
+	_GCoff             = iota // GC 没有运行，sweep 在后台运行，写屏障没有启用
+	_GCmark                   // GC 标记 roots 和 workbufs: 分配黑色，写屏障启用
+	_GCmarktermination        // GC 标记终止: 分配黑色, P's 帮助 GC, 写屏障启用
 )
 
 //go:nosplit
 func setGCPhase(x uint32) {
-	atomic.Store(&gcphase, x)
+	atomic.Store(&gcphase, x) // *gcphase = x
 	writeBarrier.needed = gcphase == _GCmark || gcphase == _GCmarktermination
 	writeBarrier.enabled = writeBarrier.needed || writeBarrier.cgo
 }
@@ -378,23 +370,6 @@ func (c *gcControllerState) startCycle() {
 	c.fractionalMarkTime = 0
 	c.idleMarkTime = 0
 
-	// If this is the first GC cycle or we're operating on a very
-	// small heap, fake heap_marked so it looks like gc_trigger is
-	// the appropriate growth from heap_marked, even though the
-	// real heap_marked may not have a meaningful value (on the
-	// first cycle) or may be much smaller (resulting in a large
-	// error response).
-	if memstats.gc_trigger <= heapminimum {
-		memstats.heap_marked = uint64(float64(memstats.gc_trigger) / (1 + memstats.triggerRatio))
-	}
-
-	// Re-compute the heap goal for this cycle in case something
-	// changed. This is the same calculation we use elsewhere.
-	memstats.next_gc = memstats.heap_marked + memstats.heap_marked*uint64(gcpercent)/100
-	if gcpercent < 0 {
-		memstats.next_gc = ^uint64(0)
-	}
-
 	// Ensure that the heap goal is at least a little larger than
 	// the current live heap size. This may not be the case if GC
 	// start is delayed or if the allocation that pushed heap_live
@@ -429,7 +404,7 @@ func (c *gcControllerState) startCycle() {
 		c.fractionalUtilizationGoal = 0
 	}
 
-	// In STW mode, we just want dedicated workers.
+	// 在 STW 模式下, 我们只想要专用的 worker
 	if debug.gcstoptheworld > 0 {
 		c.dedicatedMarkWorkersNeeded = int64(gomaxprocs)
 		c.fractionalUtilizationGoal = 0
@@ -455,14 +430,11 @@ func (c *gcControllerState) startCycle() {
 	}
 }
 
-// revise updates the assist ratio during the GC cycle to account for
-// improved estimates. This should be called either under STW or
-// whenever memstats.heap_scan, memstats.heap_live, or
-// memstats.next_gc is updated (with mheap_.lock held).
+// revise 在 GC 周期期间更新 assist ratio 以考虑改进估计。
+// 该函数应该在 STW 或者下调用，或每当 memstats.heap_scan，memstats.heap_live 或
+// memstats.next_gc （在只有 mheap_.lock 的情况下）更新时调用。
 //
-// It should only be called when gcBlackenEnabled != 0 (because this
-// is when assists are enabled and the necessary statistics are
-// available).
+// 它只应在 gcBlackenEnabled != 0 时调用（因为这是启用 assist 并且必要的统计信息可用的时候）。
 func (c *gcControllerState) revise() {
 	gcpercent := gcpercent
 	if gcpercent < 0 {
@@ -559,7 +531,7 @@ func (c *gcControllerState) endCycle() float64 {
 	// growth if we had the desired CPU utilization). The
 	// difference between this estimate and the GOGC-based goal
 	// heap growth is the error.
-	goalGrowthRatio := float64(gcpercent) / 100
+	goalGrowthRatio := gcEffectiveGrowthRatio()
 	actualGrowthRatio := float64(memstats.heap_live)/float64(memstats.heap_marked) - 1
 	assistDuration := nanotime() - c.markStartTime
 
@@ -739,6 +711,14 @@ func pollFractionalWorkerExit() bool {
 //
 // mheap_.lock must be held or the world must be stopped.
 func gcSetTriggerRatio(triggerRatio float64) {
+	// Compute the next GC goal, which is when the allocated heap
+	// has grown by GOGC/100 over the heap marked by the last
+	// cycle.
+	goal := ^uint64(0)
+	if gcpercent >= 0 {
+		goal = memstats.heap_marked + memstats.heap_marked*uint64(gcpercent)/100
+	}
+
 	// Set the trigger ratio, capped to reasonable bounds.
 	if triggerRatio < 0 {
 		// This can happen if the mutator is allocating very
@@ -754,22 +734,21 @@ func gcSetTriggerRatio(triggerRatio float64) {
 	}
 	memstats.triggerRatio = triggerRatio
 
-	// Compute the absolute GC trigger from the trigger ratio.
+	// 根据触发器比率来计算绝对的 GC 触发器
 	//
-	// We trigger the next GC cycle when the allocated heap has
-	// grown by the trigger ratio over the marked heap size.
+	// 当分配的堆的大小超过标记的堆大小时，我们触发下一个 GC 循环。
 	trigger := ^uint64(0)
 	if gcpercent >= 0 {
 		trigger = uint64(float64(memstats.heap_marked) * (1 + triggerRatio))
-		// Don't trigger below the minimum heap size.
+		// 小于最小堆大小时不触发
 		minTrigger := heapminimum
-		if !isSweepDone() {
+		if !isSweepDone() { // 即 mheap_.sweepdone != 0
 			// Concurrent sweep happens in the heap growth
 			// from heap_live to gc_trigger, so ensure
 			// that concurrent sweep has some heap growth
 			// in which to perform sweeping before we
 			// start the next GC cycle.
-			sweepMin := atomic.Load64(&memstats.heap_live) + sweepMinHeapDistance*uint64(gcpercent)/100
+			sweepMin := atomic.Load64(&memstats.heap_live) + sweepMinHeapDistance
 			if sweepMin > minTrigger {
 				minTrigger = sweepMin
 			}
@@ -781,33 +760,27 @@ func gcSetTriggerRatio(triggerRatio float64) {
 			print("runtime: next_gc=", memstats.next_gc, " heap_marked=", memstats.heap_marked, " heap_live=", memstats.heap_live, " initialHeapLive=", work.initialHeapLive, "triggerRatio=", triggerRatio, " minTrigger=", minTrigger, "\n")
 			throw("gc_trigger underflow")
 		}
-	}
-	memstats.gc_trigger = trigger
-
-	// Compute the next GC goal, which is when the allocated heap
-	// has grown by GOGC/100 over the heap marked by the last
-	// cycle.
-	goal := ^uint64(0)
-	if gcpercent >= 0 {
-		goal = memstats.heap_marked + memstats.heap_marked*uint64(gcpercent)/100
-		if goal < trigger {
+		if trigger > goal {
 			// The trigger ratio is always less than GOGC/100, but
 			// other bounds on the trigger may have raised it.
 			// Push up the goal, too.
 			goal = trigger
 		}
 	}
+
+	// Commit to the trigger and goal.
+	memstats.gc_trigger = trigger
 	memstats.next_gc = goal
 	if trace.enabled {
 		traceNextGC()
 	}
 
-	// Update mark pacing.
+	// 更新 mark 步调.
 	if gcphase != _GCoff {
 		gcController.revise()
 	}
 
-	// Update sweep pacing.
+	// 更新 sweep 步调.
 	if isSweepDone() {
 		mheap_.sweepPagesPerByte = 0
 	} else {
@@ -839,6 +812,26 @@ func gcSetTriggerRatio(triggerRatio float64) {
 			atomic.Store64(&mheap_.pagesSweptBasis, pagesSwept)
 		}
 	}
+
+	gcPaceScavenger()
+}
+
+// gcEffectiveGrowthRatio returns the current effective heap growth
+// ratio (GOGC/100) based on heap_marked from the previous GC and
+// next_gc for the current GC.
+//
+// This may differ from gcpercent/100 because of various upper and
+// lower bounds on gcpercent. For example, if the heap is smaller than
+// heapminimum, this can be higher than gcpercent/100.
+//
+// mheap_.lock must be held or the world must be stopped.
+func gcEffectiveGrowthRatio() float64 {
+	egogc := float64(memstats.next_gc-memstats.heap_marked) / float64(memstats.heap_marked)
+	if egogc < 0 {
+		// Shouldn't happen, but just in case.
+		egogc = 0
+	}
+	return egogc
 }
 
 // gcGoalUtilization is the goal CPU utilization for
@@ -994,19 +987,15 @@ var work struct {
 // garbage collection is complete. It may also block the entire
 // program.
 func GC() {
-	// We consider a cycle to be: sweep termination, mark, mark
-	// termination, and sweep. This function shouldn't return
-	// until a full cycle has been completed, from beginning to
-	// end. Hence, we always want to finish up the current cycle
-	// and start a new one. That means:
+	// 我们考虑一个周期：清扫终止, 标记, 标记终止, 清扫.
+	// 这个函数在一个从开始到结束的完整周期完成之前，不应该返回。
+	// 因此我们总是希望完成当前周期，然后开始下一个周期，这意味着：
 	//
-	// 1. In sweep termination, mark, or mark termination of cycle
-	// N, wait until mark termination N completes and transitions
-	// to sweep N.
+	// 1. 在周期 N 的清扫终止、标记或者标记终止中，总是等待到第 N 个标记终止完成且转换到第 N 个清扫
 	//
-	// 2. In sweep N, help with sweep N.
+	// 2. 在清扫 N 时，帮助清扫 N。
 	//
-	// At this point we can begin a full cycle N+1.
+	// 这时我们可以开始第 N+1 个周期
 	//
 	// 3. Trigger cycle N+1 by starting sweep termination N+1.
 	//
@@ -1066,25 +1055,26 @@ func GC() {
 	releasem(mp)
 }
 
-// gcWaitOnMark blocks until GC finishes the Nth mark phase. If GC has
-// already completed this mark phase, it returns immediately.
+// gcWaitOnMark 将阻塞到 GC 完成第 N 个周期的 Mark 阶段。
+// 如果 GC 已经完成了该 Mark 阶段，则立刻返回。
 func gcWaitOnMark(n uint32) {
 	for {
-		// Disable phase transitions.
+		// 禁止转换到不同的阶段
 		lock(&work.sweepWaiters.lock)
+
+		// 读取 GC 的周期数
 		nMarks := atomic.Load(&work.cycles)
 		if gcphase != _GCmark {
-			// We've already completed this cycle's mark.
+			// 已经完成该周期的 Mark 阶段
 			nMarks++
 		}
 		if nMarks > n {
-			// We're done.
+			// 完成，立刻返回
 			unlock(&work.sweepWaiters.lock)
 			return
 		}
 
-		// Wait until sweep termination, mark, and mark
-		// termination of cycle N complete.
+		// 等待到第 N 个周期的清扫终止、标记、标记终止结束
 		work.sweepWaiters.list.push(getg())
 		goparkunlock(&work.sweepWaiters.lock, waitReasonWaitForGCCycle, traceEvGoBlock, 1)
 	}
@@ -1094,87 +1084,70 @@ func gcWaitOnMark(n uint32) {
 type gcMode int
 
 const (
-	gcBackgroundMode gcMode = iota // concurrent GC and sweep
-	gcForceMode                    // stop-the-world GC now, concurrent sweep
-	gcForceBlockMode               // stop-the-world GC now and STW sweep (forced by user)
+	gcBackgroundMode gcMode = iota // 并发 GC 与清扫
+	gcForceMode                    // 立即 stop-the-world GC, 并发 sweep
+	gcForceBlockMode               // 立即 stop-the-world GC, 以及 STW sweep (用户强制)
 )
 
-// A gcTrigger is a predicate for starting a GC cycle. Specifically,
-// it is an exit condition for the _GCoff phase.
+// gcTrigger 是一个 GC 周期开始的谓词。具体而言，它是一个 _GCoff 阶段的退出条件
 type gcTrigger struct {
 	kind gcTriggerKind
-	now  int64  // gcTriggerTime: current time
-	n    uint32 // gcTriggerCycle: cycle number to start
+	now  int64  // gcTriggerTime: 当前时间
+	n    uint32 // gcTriggerCycle: 开始的周期数
 }
 
 type gcTriggerKind int
 
 const (
-	// gcTriggerAlways indicates that a cycle should be started
-	// unconditionally, even if GOGC is off or we're in a cycle
-	// right now. This cannot be consolidated with other cycles.
-	gcTriggerAlways gcTriggerKind = iota
+	// gcTriggerHeap 表示当堆大小达到控制器计算的触发堆大小时开始一个周期
+	gcTriggerHeap gcTriggerKind = iota
 
-	// gcTriggerHeap indicates that a cycle should be started when
-	// the heap size reaches the trigger heap size computed by the
-	// controller.
-	gcTriggerHeap
-
-	// gcTriggerTime indicates that a cycle should be started when
-	// it's been more than forcegcperiod nanoseconds since the
-	// previous GC cycle.
+	// gcTriggerTime 表示自上一个 GC 周期后当循环超过
+	// forcegcperiod 纳秒时应开始一个周期。
 	gcTriggerTime
 
-	// gcTriggerCycle indicates that a cycle should be started if
-	// we have not yet started cycle number gcTrigger.n (relative
-	// to work.cycles).
+	// gcTriggerCycle 表示如果我们还没有启动第 gcTrigger.n 个周期
+	// （相对于 work.cycles）时应开始一个周期。
 	gcTriggerCycle
 )
 
-// test reports whether the trigger condition is satisfied, meaning
-// that the exit condition for the _GCoff phase has been met. The exit
-// condition should be tested when allocating.
+// test 报告当前出发条件是否满足，换句话说 _GCoff 阶段的退出条件已满足。
+// 退出条件应该在分配阶段已完成测试。
 func (t gcTrigger) test() bool {
-	if !memstats.enablegc || panicking != 0 {
+	// 如果已禁用 GC
+	if !memstats.enablegc || panicking != 0 || gcphase != _GCoff {
 		return false
 	}
-	if t.kind == gcTriggerAlways {
-		return true
-	}
-	if gcphase != _GCoff {
-		return false
-	}
+	// 根据类别做不同判断
 	switch t.kind {
 	case gcTriggerHeap:
-		// Non-atomic access to heap_live for performance. If
-		// we are going to trigger on this, this thread just
-		// atomically wrote heap_live anyway and we'll see our
-		// own write.
+		// 上个周期结束时剩余的加上到目前为止分配的内存 超过 触发标记阶段标准的内存
+		// 考虑性能问题，对非原子操作访问 heap_live 。如果我们需要触发该条件，
+		// 则所在线程一定会原子的写入 heap_live，从而我们会观察到我们的写入。
 		return memstats.heap_live >= memstats.gc_trigger
 	case gcTriggerTime:
-		if gcpercent < 0 {
+		if gcpercent < 0 { // 因为允许在运行时动态调整 gcpercent，因此需要额外再检查一遍
 			return false
 		}
+		// 计算上次 gc 开始时间是否大于强制执行 GC 周期的时间
 		lastgc := int64(atomic.Load64(&memstats.last_gc_nanotime))
 		return lastgc != 0 && t.now-lastgc > forcegcperiod
 	case gcTriggerCycle:
-		// t.n > work.cycles, but accounting for wraparound.
+		// 进行测试的周期 t.n 大于实际触发的，需要进行 GC 则通过测试
 		return int32(t.n-work.cycles) > 0
 	}
 	return true
 }
 
-// gcStart starts the GC. It transitions from _GCoff to _GCmark (if
-// debug.gcstoptheworld == 0) or performs all of GC (if
-// debug.gcstoptheworld != 0).
+// gcStart 开始执行 GC. 它从 _GCoff 过渡到 _GCmark （如果 debug.gcstoptheworld == 0）
+// 或执行所有 GC（如果 debug.gcstoptheworld != 0）
 //
 // This may return without performing this transition in some cases,
 // such as when called on a system stack or with locks held.
+// 他可在没有完成过渡的情况下返回，例如当在一个系统栈上调用、或者当锁被持有时。
 func gcStart(trigger gcTrigger) {
-	// Since this is called from malloc and malloc is called in
-	// the guts of a number of libraries that might be holding
-	// locks, don't attempt to start GC in non-preemptible or
-	// potentially unstable situations.
+	// 于这是从 malloc 调用的，而 malloc 是在许多可能持有锁的库的内核中调用的，
+	// 因此不要尝试在非抢占或可能不稳定的情况下启动 GC。
 	mp := acquirem()
 	if gp := getg(); gp == mp.g0 || mp.locks > 1 || mp.preemptoff != "" {
 		releasem(mp)
@@ -1183,36 +1156,30 @@ func gcStart(trigger gcTrigger) {
 	releasem(mp)
 	mp = nil
 
-	// Pick up the remaining unswept/not being swept spans concurrently
+	// 并发拾取剩余的 unswept/not being swept spans。
+	// 如果我们在后台模式下被调用，这不应该发生，
+	// 因为比例扫描应该刚刚完成扫描一切，但是舍入错误等可能会留下几个未扫描的跨度。
+	// 在强制模式下，这是必要的，因为可以在扫描周期的任何点强制 GC。
+	// 我们在这里连续检查转换条件，以防 G defer 到下一个 GC 循环。
 	//
-	// This shouldn't happen if we're being invoked in background
-	// mode since proportional sweep should have just finished
-	// sweeping everything, but rounding errors, etc, may leave a
-	// few spans unswept. In forced mode, this is necessary since
-	// GC can be forced at any point in the sweeping cycle.
-	//
-	// We check the transition condition continuously here in case
-	// this G gets delayed in to the next GC cycle.
+	// 记录启动的 sweeper 数量
 	for trigger.test() && sweepone() != ^uintptr(0) {
 		sweep.nbgsweep++
 	}
 
-	// Perform GC initialization and the sweep termination
-	// transition.
+	// 执行 GC 初始化，以及 sweep 终止转换 termination transition
 	semacquire(&work.startSema)
-	// Re-check transition condition under transition lock.
+	// 在持有锁的情况下 重新检查转换条件，若不需要触发则不触发
 	if !trigger.test() {
 		semrelease(&work.startSema)
 		return
 	}
 
-	// For stats, check if this GC was forced by the user.
-	work.userForced = trigger.kind == gcTriggerAlways || trigger.kind == gcTriggerCycle
+	// 对于统计信息，请检查用户是否强制使用此 GC。
+	work.userForced = trigger.kind == gcTriggerCycle
 
-	// In gcstoptheworld debug mode, upgrade the mode accordingly.
-	// We do this after re-checking the transition condition so
-	// that multiple goroutines that detect the heap trigger don't
-	// start multiple STW GCs.
+	// 在 gcstoptheworld 调试模式下，相应地升级模式。
+	// 我们在重新检查转换条件之后执行此操作，以便检测堆触发器的多个 goroutine 不会启动多个 STW GC。
 	mode := gcBackgroundMode
 	if debug.gcstoptheworld == 1 {
 		mode = gcForceMode
@@ -1220,14 +1187,14 @@ func gcStart(trigger gcTrigger) {
 		mode = gcForceBlockMode
 	}
 
-	// Ok, we're doing it! Stop everybody else
+	// 好的，我们确实要进行 GC，停止所有其他人！
 	semacquire(&worldsema)
 
 	if trace.enabled {
 		traceGCStart()
 	}
 
-	// Check that all Ps have finished deferred mcache flushes.
+	// 检查所有 Ps 是否已完成 defer 的 mcache 刷新。
 	for _, p := range allp {
 		if fg := atomic.Load(&p.mcache.flushGen); fg != mheap_.sweepgen {
 			println("runtime: p", p.id, "flushGen", fg, "!= sweepgen", mheap_.sweepgen)
@@ -1237,12 +1204,11 @@ func gcStart(trigger gcTrigger) {
 
 	gcBgMarkStartWorkers()
 
-	gcResetMarkState()
+	systemstack(gcResetMarkState)
 
 	work.stwprocs, work.maxprocs = gomaxprocs, gomaxprocs
 	if work.stwprocs > ncpu {
-		// This is used to compute CPU time of the STW phases,
-		// so it can't be more than ncpu, even if GOMAXPROCS is.
+		// 这用于计算 STW 阶段的 CPU 时间，所以它不能超过 ncpu，即使 GOMAXPROCS 是。
 		work.stwprocs = ncpu
 	}
 	work.heap0 = atomic.Load64(&memstats.heap_live)
@@ -1256,12 +1222,10 @@ func gcStart(trigger gcTrigger) {
 		traceGCSTWStart(1)
 	}
 	systemstack(stopTheWorldWithSema)
-	// Finish sweep before we start concurrent scan.
 	systemstack(func() {
 		finishsweep_m()
 	})
-	// clearpools before we start the GC. If we wait they memory will not be
-	// reclaimed until the next GC cycle.
+	// 我们启动 GC 之前的 clearpools。 如果我们等待，直到下一个 GC 循环，他们的内存将不会被回收。
 	clearpools()
 
 	work.cycles++
@@ -1269,9 +1233,8 @@ func gcStart(trigger gcTrigger) {
 	gcController.startCycle()
 	work.heapGoal = memstats.next_gc
 
-	// In STW mode, disable scheduling of user Gs. This may also
-	// disable scheduling of this goroutine, so it may block as
-	// soon as we start the world again.
+	// 在 STW 模式下，禁用用户 Gs 的调度。 这也可能会禁用此 goroutine 的调度，
+	// 因此一旦我们再次启动世界，它就可能会阻塞。
 	if mode != gcBackgroundMode {
 		schedEnableUser(false)
 	}
@@ -1290,38 +1253,33 @@ func gcStart(trigger gcTrigger) {
 	// allocations are blocked until assists can
 	// happen, we want enable assists as early as
 	// possible.
+	// 输入并发标记阶段并启用写入障碍。
+	// 因为世界已经停止，所有Ps都会观察到，当我们开始世界并开始扫描时，写入障碍就会被启用。
+	// 必须在启用辅助之前启用写入障碍，因为必须在标记任何非叶堆对象之前启用它们。 由于分配被阻止直到助攻可能发生，我们希望尽早启用助攻。
 	setGCPhase(_GCmark)
 
-	gcBgMarkPrepare() // Must happen before assist enable.
+	gcBgMarkPrepare() // 必须 happen before assist enable.
 	gcMarkRootPrepare()
 
-	// Mark all active tinyalloc blocks. Since we're
-	// allocating from these, they need to be black like
-	// other allocations. The alternative is to blacken
-	// the tiny block on every allocation from it, which
-	// would slow down the tiny allocator.
+	// 标记所有活动的 tinyalloc 块。由于我们从这些分配，他们需要像其他分配一样黑。
+	// 另一种方法是在每次分配时使小块变黑，这会减慢 tiny allocator。
 	gcMarkTinyAllocs()
 
-	// At this point all Ps have enabled the write
-	// barrier, thus maintaining the no white to
-	// black invariant. Enable mutator assists to
-	// put back-pressure on fast allocating
-	// mutators.
+	// 此时所有 Ps 都启用了写入屏障，从而保持了无白色到黑色的不变性。
+	// 启用 mutator 协助对快速分配 mutator 施加压力。
 	atomic.Store(&gcBlackenEnabled, 1)
 
-	// Assists and workers can start the moment we start
-	// the world.
+	// Assists 和 workers 可以在我们 start the world 的瞬间直接启动
 	gcController.markStartTime = now
 
-	// Concurrent mark.
+	// 并发 mark
 	systemstack(func() {
 		now = startTheWorldWithSema(trace.enabled)
 		work.pauseNS += now - work.pauseStart
 		work.tMark = now
 	})
-	// In STW mode, we could block the instant systemstack
-	// returns, so don't do anything important here. Make sure we
-	// block rather than returning to user code.
+	// 在 STW 模式下，我们可以阻止即时 systemstack 返回，所以这里不要做任何重要的事情。
+	// 确保我们阻止而不是返回用户代码。
 	if mode != gcBackgroundMode {
 		Gosched()
 	}
@@ -1746,10 +1704,8 @@ func gcMarkTermination(nextTriggerRatio float64) {
 	}
 }
 
-// gcBgMarkStartWorkers prepares background mark worker goroutines.
-// These goroutines will not run until the mark phase, but they must
-// be started while the work is not stopped and from a regular G
-// stack. The caller must hold worldsema.
+// gcBgMarkStartWorkers 准备后台标记 worker goroutines。
+// 这些 goroutine 直到标记阶段才会运行，但它们必须在工作未停止时从常规 G 栈启动。调用方必须持有 worldsema。
 func gcBgMarkStartWorkers() {
 	// Background marking is performed by per-P G's. Ensure that
 	// each P has a background GC G.
@@ -1967,7 +1923,6 @@ func gcMarkWorkAvailable(p *p) bool {
 // gcMark runs the mark (or, for concurrent GC, mark termination)
 // All gcWork caches must be empty.
 // STW is in effect at this point.
-//TODO go:nowritebarrier
 func gcMark(start_time int64) {
 	if debug.allocfreetrace > 0 {
 		tracegc()
@@ -2044,9 +1999,8 @@ func gcMark(start_time int64) {
 	// Update the marked heap stat.
 	memstats.heap_marked = work.bytesMarked
 
-	// Update other GC heap size stats. This must happen after
-	// cachestats (which flushes local statistics to these) and
-	// flushallmcaches (which modifies heap_live).
+	// 更新其他 GC 堆大小统计信息。此操作必须发生在 cachestats
+	// (因为它会刷新这些值得局部统计) 和 flushallmcaches （会修改 heap_live） 之后
 	memstats.heap_live = work.bytesMarked
 	memstats.heap_scan = uint64(gcController.scanWork)
 
@@ -2055,6 +2009,8 @@ func gcMark(start_time int64) {
 	}
 }
 
+// gcSweep 必须在系统栈上调用，因为它要求持有 heap.lock, 参见 mheap
+//go:systemstack
 func gcSweep(mode gcMode) {
 	if gcphase != _GCoff {
 		throw("gcSweep being done but phase is not GCoff")
@@ -2111,6 +2067,14 @@ func gcSweep(mode gcMode) {
 //
 // This is safe to do without the world stopped because any Gs created
 // during or after this will start out in the reset state.
+//
+// gcResetMarkState must be called on the system stack because it acquires
+// the heap lock. See mheap for details.
+// gcResetMarkState 在标记（并发或 STW）之前重置全局状态，并重置所有 G 的堆栈扫描状态。
+// 如果没有世界停止，这是安全的，因为在此期间或之后创建的任何 Gs 将在重置状态下开始。
+// 必须在系统堆栈上调用 gcResetMarkState，因为它获取堆锁。 有关详细信息，请参阅 mheap。
+//
+//go:systemstack
 func gcResetMarkState() {
 	// This may be called during a concurrent phase, so make sure
 	// allgs doesn't change.

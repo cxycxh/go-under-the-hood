@@ -32,9 +32,9 @@ import (
 //
 // shade 表示 通过对 wbuf 添加引用并标记它已经观察到了白色指针。
 //
-// 两个 shade 以及条件语句一起工作来防止 mutator 隐藏垃圾搜集器中的对象：
+// 两个 shade 以及条件语句一起工作来防止赋值器隐藏垃圾搜集器中的对象：
 //
-// 1. shade(*slot) 通过将一个指针从堆移动到栈 来防止 mutator 一个对象。
+// 1. shade(*slot) 通过将一个指针从堆移动到栈来防止赋值器的一个对象。
 //    如果它视图从堆中取消链接，则会进行着色。
 //
 // 2. shade(ptr) 通过将一个对象从栈移动到堆的黑色对象来防止 mutator 隐藏对象。
@@ -50,20 +50,16 @@ import (
 //
 // 处理内存顺序:
 //
-// Both the Yuasa and Dijkstra barriers can be made conditional on the
-// color of the object containing the slot. We chose not to make these
-// conditional because the cost of ensuring that the object holding
-// the slot doesn't concurrently change color without the mutator
-// noticing seems prohibitive.
+// Yuasa 和 Dijkstra 屏障都可以以包含槽的对象的颜色为条件。
+// 我们选择不进行这些条件化，因为确保持有槽的对象不会在没有 mutator 注意的情况下
+// 同时改变颜色的成本似乎过高。
 //
-// Consider the following example where the mutator writes into
-// a slot and then loads the slot's mark bit while the GC thread
-// writes to the slot's mark bit and then as part of scanning reads
-// the slot.
+// 考虑以下示例，其中 mutator 写入插槽然后加载插槽的标记位，
+// 而 GC 线程写入插槽的标记位，然后作为扫描的一部分读取插槽。
 //
-// Initially both [slot] and [slotmark] are 0 (nil)
-// Mutator thread          GC thread
-// st [slot], ptr          st [slotmark], 1
+// 初始状态下 [slot] 和 [slotmark] 均为 0 (nil)
+// Mutator 线程          GC 线程
+// st [slot], ptr       st [slotmark], 1
 //
 // ld r1, [slotmark]       ld r2, [slot]
 //
@@ -89,7 +85,7 @@ import (
 // value of mheap_.arena_used. (See issue #9984.)
 //
 //
-// Stack writes:
+// 栈写入(stack writes):
 //
 // The compiler omits write barriers for writes to the current frame,
 // but if a stack pointer has been passed down the call stack, the
@@ -113,24 +109,20 @@ import (
 // global during mark termination.
 //
 //
-// Publication ordering:
+// 公开顺序(publication ordering):
 //
 // The write barrier is *pre-publication*, meaning that the write
 // barrier happens prior to the *slot = ptr write that may make ptr
 // reachable by some goroutine that currently cannot reach it.
 //
 //
-// Signal handler pointer writes:
+// 信号处理指针写入:
 //
-// In general, the signal handler cannot safely invoke the write
-// barrier because it may run without a P or even during the write
-// barrier.
+// 通常，信号处理程序无法安全地调用写屏障，因为它可以在没有 P 的情况下运行，甚至在写屏障期间也可以运行。
 //
-// There is exactly one exception: profbuf.go omits a barrier during
-// signal handler profile logging. That's safe only because of the
-// deletion barrier. See profbuf.go for a detailed argument. If we
-// remove the deletion barrier, we'll have to work out a new way to
-// handle the profile logging.
+// 只有一个例外：profbuf.go 在信号处理程序配置文件记录期间省略了一个障碍。
+// 这只是因为删除障碍而安全。有关详细参数，请参阅 profbuf.go。
+// 如果我们移除删除障碍，我们将必须找到一种新方法来处理配置文件记录。
 
 // typedmemmove copies a value of type t to dst from src.
 // Must be nosplit, see #16026.
@@ -143,7 +135,7 @@ func typedmemmove(typ *_type, dst, src unsafe.Pointer) {
 	if dst == src {
 		return
 	}
-	if typ.kind&kindNoPointers == 0 {
+	if typ.ptrdata != 0 {
 		bulkBarrierPreWrite(uintptr(dst), uintptr(src), typ.size)
 	}
 	// There's a race here: if some other goroutine can write to
@@ -172,11 +164,16 @@ func reflect_typedmemmove(typ *_type, dst, src unsafe.Pointer) {
 	typedmemmove(typ, dst, src)
 }
 
+//go:linkname reflectlite_typedmemmove internal/reflectlite.typedmemmove
+func reflectlite_typedmemmove(typ *_type, dst, src unsafe.Pointer) {
+	reflect_typedmemmove(typ, dst, src)
+}
+
 // typedmemmovepartial is like typedmemmove but assumes that
 // dst and src point off bytes into the value and only copies size bytes.
 //go:linkname reflect_typedmemmovepartial reflect.typedmemmovepartial
 func reflect_typedmemmovepartial(typ *_type, dst, src unsafe.Pointer, off, size uintptr) {
-	if writeBarrier.needed && typ.kind&kindNoPointers == 0 && size >= sys.PtrSize {
+	if writeBarrier.needed && typ.ptrdata != 0 && size >= sys.PtrSize {
 		// Pointer-align start address for bulk barrier.
 		adst, asrc, asize := dst, src, size
 		if frag := -off & (sys.PtrSize - 1); frag != 0 {
@@ -204,7 +201,7 @@ func reflect_typedmemmovepartial(typ *_type, dst, src unsafe.Pointer, off, size 
 //
 //go:nosplit
 func reflectcallmove(typ *_type, dst, src unsafe.Pointer, size uintptr) {
-	if writeBarrier.needed && typ != nil && typ.kind&kindNoPointers == 0 && size >= sys.PtrSize {
+	if writeBarrier.needed && typ != nil && typ.ptrdata != 0 && size >= sys.PtrSize {
 		bulkBarrierPreWrite(uintptr(dst), uintptr(src), size)
 	}
 	memmove(dst, src, size)
@@ -245,7 +242,7 @@ func typedslicecopy(typ *_type, dst, src slice) int {
 		return n
 	}
 
-	// Note: No point in checking typ.kind&kindNoPointers here:
+	// Note: No point in checking typ.ptrdata here:
 	// compiler only emits calls to typedslicecopy for types with pointers,
 	// and growslice and reflect_typedslicecopy check for pointers
 	// before calling typedslicecopy.
@@ -261,7 +258,7 @@ func typedslicecopy(typ *_type, dst, src slice) int {
 
 //go:linkname reflect_typedslicecopy reflect.typedslicecopy
 func reflect_typedslicecopy(elemType *_type, dst, src slice) int {
-	if elemType.kind&kindNoPointers != 0 {
+	if elemType.ptrdata == 0 {
 		n := dst.len
 		if n > src.len {
 			n = src.len
@@ -298,7 +295,7 @@ func reflect_typedslicecopy(elemType *_type, dst, src slice) int {
 //
 //go:nosplit
 func typedmemclr(typ *_type, ptr unsafe.Pointer) {
-	if typ.kind&kindNoPointers == 0 {
+	if typ.ptrdata != 0 {
 		bulkBarrierPreWrite(uintptr(ptr), 0, typ.size)
 	}
 	memclrNoHeapPointers(ptr, typ.size)
@@ -311,7 +308,7 @@ func reflect_typedmemclr(typ *_type, ptr unsafe.Pointer) {
 
 //go:linkname reflect_typedmemclrpartial reflect.typedmemclrpartial
 func reflect_typedmemclrpartial(typ *_type, ptr unsafe.Pointer, off, size uintptr) {
-	if typ.kind&kindNoPointers == 0 {
+	if typ.ptrdata != 0 {
 		bulkBarrierPreWrite(uintptr(ptr), 0, size)
 	}
 	memclrNoHeapPointers(ptr, size)
@@ -324,7 +321,7 @@ func reflect_typedmemclr(typ *_type, ptr unsafe.Pointer) {
 
 //go:linkname reflect_typedmemclrpartial reflect.typedmemclrpartial
 func reflect_typedmemclrpartial(typ *_type, ptr unsafe.Pointer, off, size uintptr) {
-	if typ.kind&kindNoPointers == 0 {
+	if typ.ptrdata != 0 {
 		bulkBarrierPreWrite(uintptr(ptr), 0, size)
 	}
 	memclrNoHeapPointers(ptr, size)
@@ -332,7 +329,7 @@ func reflect_typedmemclrpartial(typ *_type, ptr unsafe.Pointer, off, size uintpt
 
 // memclrHasPointers clears n bytes of typed memory starting at ptr.
 // The caller must ensure that the type of the object at ptr has
-// pointers, usually by checking typ.kind&kindNoPointers. However, ptr
+// pointers, usually by checking typ.ptrdata. However, ptr
 // does not have to point to the start of the allocation.
 //
 //go:nosplit

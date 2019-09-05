@@ -18,7 +18,7 @@ import (
 type mcache struct {
 	// 下面的成员在每次 malloc 时都会被访问
 	// 因此将它们放到一起来利用缓存的局部性原理
-	next_sample int32   // 分配这么多字节后触发堆样本
+	next_sample uintptr	// 分配这么多字节后触发堆样本
 	local_scan  uintptr // 分配的可扫描堆的字节数
 
 	// 没有指针的微小对象的分配器缓存。
@@ -78,10 +78,13 @@ type stackfreelist struct {
 var emptymspan mspan
 
 func allocmcache() *mcache {
-	lock(&mheap_.lock)
-	c := (*mcache)(mheap_.cachealloc.alloc())
-	c.flushGen = mheap_.sweepgen
-	unlock(&mheap_.lock)
+	var c *mcache
+	systemstack(func() {
+		lock(&mheap_.lock)
+		c = (*mcache)(mheap_.cachealloc.alloc())
+		c.flushGen = mheap_.sweepgen
+		unlock(&mheap_.lock)
+	}
 	for i := range c.alloc {
 		c.alloc[i] = &emptymspan // 暂时指向虚拟的 mspan 中
 	}
@@ -177,5 +180,5 @@ func (c *mcache) prepareForSweep() {
 	}
 	c.releaseAll()
 	stackcache_clear(c)
-	atomic.Store(&c.flushGen, mheap_.sweepgen) // Synchronizes with gcStart
+	atomic.Store(&c.flushGen, mheap_.sweepgen) // 与 gcStart 同步
 }

@@ -356,7 +356,7 @@ func SetFinalizer(obj interface{}, finalizer interface{}) {
 	if uintptr(e.data) != base {
 		// As an implementation detail we allow to set finalizers for an inner byte
 		// of an object if it could come from tiny alloc (see mallocgc for details).
-		if ot.elem == nil || ot.elem.kind&kindNoPointers == 0 || ot.elem.size >= maxTinySize {
+		if ot.elem == nil || ot.elem.ptrdata != 0 || ot.elem.size >= maxTinySize {
 			throw("runtime.SetFinalizer: pointer not at beginning of allocated block")
 		}
 	}
@@ -420,9 +420,6 @@ okarg:
 		}
 	})
 }
-
-// Mark KeepAlive as noinline so that it is easily detectable as an intrinsic.
-//go:noinline
 
 // KeepAlive 将其参数标记为当前可达。
 // 这保证了对象在调用 KeepAlive 之前不会被释放，且它的 finalizer 不会运行，

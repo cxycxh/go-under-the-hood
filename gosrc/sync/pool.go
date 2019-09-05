@@ -43,6 +43,9 @@ type Pool struct {
 	local     unsafe.Pointer // local 固定大小 per-P 池, 实际类型为 [P]poolLocal
 	localSize uintptr        // local array 的大小
 
+	victim     unsafe.Pointer // 来自前一个周期的 local
+	victimSize uintptr        // victim 数组的大小
+
 	// New 方法在 Get 失败的情况下，选择性的创建一个值
 	// 即使并发调用 Get 的时候值也可能不会改变（同一个）
 	New func() interface{}
@@ -50,9 +53,8 @@ type Pool struct {
 
 // Local per-P Pool appendix.
 type poolLocalInternal struct {
-	private interface{}   // 只能被不同的 P 使用.
-	shared  []interface{} // 可以被任意 P 使用.
-	Mutex                 // 并发锁
+	private interface{} // 只能被不同的 P 使用.
+	shared  poolChain   // Local P 可以进行 pushHead/popHead 操作; 任何 P 都可以进行 popTail
 }
 
 type poolLocal struct {
@@ -63,7 +65,7 @@ type poolLocal struct {
 	pad [128 - unsafe.Sizeof(poolLocalInternal{})%128]byte
 }
 
-// from runtime
+// 来自运行时
 func fastrand() uint32
 
 // 此结构用于 race 检查器
@@ -97,21 +99,19 @@ func (p *Pool) Put(x interface{}) {
 	}
 
 	// 获取 localPool
-	l := p.pin()
+	l, _ := p.pin()
 
 	// 优先放入 private
 	if l.private == nil {
 		l.private = x
 		x = nil
 	}
-	runtime_procUnpin()
 
 	// 如果不能放入 private 则放入 shared
 	if x != nil {
-		l.Lock()
-		l.shared = append(l.shared, x)
-		l.Unlock()
+		l.shared.pushHead(x)
 	}
+	runtime_procUnpin()
 
 	// 恢复 race
 	if race.Enabled {
@@ -130,30 +130,21 @@ func (p *Pool) Get() interface{} {
 	}
 
 	// 返回 poolLocal
-	l := p.pin()
+	l, pid := p.pin()
 
 	// 先从 private 选择
 	x := l.private
 	l.private = nil
-	runtime_procUnpin()
 	if x == nil {
-
-		// 加锁，从 shared 获取
-		l.Lock()
-
-		// 从 shared 尾部取缓存对象
-		last := len(l.shared) - 1
-		if last >= 0 {
-			x = l.shared[last]
-			l.shared = l.shared[:last]
-		}
-		l.Unlock()
+		// 尝试从 localPool 的 shared 队列队头读取，因为队头的内存局部性比队尾更好。
+		x, _ = l.shared.popHead()
 
 		// 如果取不到，则获取新的缓存对象
 		if x == nil {
-			x = p.getSlow()
+			x = p.getSlow(pid)
 		}
 	}
+	runtime_procUnpin()
 
 	// 恢复 race 检查
 	if race.Enabled {
@@ -170,41 +161,51 @@ func (p *Pool) Get() interface{} {
 	return x
 }
 
-func (p *Pool) getSlow() (x interface{}) {
+func (p *Pool) getSlow(pid int) interface{} {
 	// See the comment in pin regarding ordering of the loads.
 	size := atomic.LoadUintptr(&p.localSize) // load-acquire
-	local := p.local                         // load-consume
-
-	// 获取 P.id
+	locals := p.local                        // load-consume
 	// 从其他 proc (poolLocal) steal 一个对象
-	pid := runtime_procPin()
-	runtime_procUnpin()
 	for i := 0; i < int(size); i++ {
 		// 获取目标 poolLocal, 引入 pid 保证不是自身
-		l := indexLocal(local, (pid+i+1)%int(size))
-
-		// 对目标 poolLocal 加锁，用于访问 share 区域
-		l.Lock()
-
-		// steal 一个缓存对象
-		last := len(l.shared) - 1
-		if last >= 0 {
-			x = l.shared[last]
-			l.shared = l.shared[:last]
-			l.Unlock()
-			break
+		l := indexLocal(locals, (pid+i+1)%int(size))
+		if x, _ := l.shared.popTail(); x != nil {
+			return x
 		}
-		l.Unlock()
 	}
-	return x
+
+	// Try the victim cache. We do this after attempting to steal
+	// from all primary caches because we want objects in the
+	// victim cache to age out if at all possible.
+	size = atomic.LoadUintptr(&p.victimSize)
+	if uintptr(pid) >= size {
+		return nil
+	}
+	locals = p.victim
+	l := indexLocal(locals, pid)
+	if x := l.private; x != nil {
+		l.private = nil
+		return x
+	}
+	for i := 0; i < int(size); i++ {
+		l := indexLocal(locals, (pid+i)%int(size))
+		if x, _ := l.shared.popTail(); x != nil {
+			return x
+		}
+	}
+
+	// Mark the victim cache as empty for future gets don't bother
+	// with it.
+	atomic.StoreUintptr(&p.victimSize, 0)
+
+	return nil
 }
 
-// pin 会将当前 goroutine 订到 P 上, 禁止抢占(preemption) 并从 poolLocal 池中返回 P 对应的 poolLocal
-// 调用方必须在完成取值后调用 runtime_procUnpin() 来取消抢占。
-func (p *Pool) pin() *poolLocal {
+// pin 会将当前的 goroutine 固定到 P 上，禁用抢占，并返回 localPool 池以及当前 P 的 pid。
+func (p *Pool) pin() (*poolLocal, int) {
 	// 返回当前 P.id
 	pid := runtime_procPin()
-	// 在 pinSlow 中会存储 localSize 后再存储 local，因此这里反过来读取
+	// 在 pinSlow 中会存储 local 后再存储 localSize，因此这里反过来读取
 	// 因为我们已经禁用了抢占，这时不会发生 GC
 	// 因此，我们必须观察 local 和 localSize 是否对应
 	// 观察到一个全新或很大的的 local 是正常行为
@@ -213,14 +214,14 @@ func (p *Pool) pin() *poolLocal {
 	// 因为可能存在动态的 P（运行时调整 P 的个数）procresize/GOMAXPROCS
 	// 如果 P.id 没有越界，则直接返回
 	if uintptr(pid) < s {
-		return indexLocal(l, pid)
+		return indexLocal(l, pid), pid
 	}
 	// 没有结果时，涉及全局加锁
 	// 例如重新分配数组内存，添加到全局列表
 	return p.pinSlow()
 }
 
-func (p *Pool) pinSlow() *poolLocal {
+func (p *Pool) pinSlow() (*poolLocal, int) {
 	// 这时取消 P 的禁止抢占，因为使用 mutex 时候 P 必须可抢占
 	runtime_procUnpin()
 
@@ -236,7 +237,7 @@ func (p *Pool) pinSlow() *poolLocal {
 	s := p.localSize
 	l := p.local
 	if uintptr(pid) < s {
-		return indexLocal(l, pid)
+		return indexLocal(l, pid), pid
 	}
 
 	// 如果数组为空，新建
@@ -255,48 +256,43 @@ func (p *Pool) pinSlow() *poolLocal {
 	atomic.StoreUintptr(&p.localSize, uintptr(size))         // store-release
 
 	// 返回所需的 pollLocal
-	return &local[pid]
+	return &local[pid], pid
 }
 
 func poolCleanup() {
 	// 该函数会注册到运行时 GC 阶段(前)，此时为 STW 状态，不需要加锁
-	// 它必须不处理分配且不调用任何运行时函数，防御性的将一切归零，有以下两点原因:
-	// 1. 防止整个 Pool 的 false retention
-	// 2. 如果 GC 发生在当有 goroutine 与 l.shared 进行 Put/Get 时，它会保留整个 Pool.
-	//    那么下个 GC 周期的内存消耗将会翻倍。
-	// 遍历所有 Pool 实例
-	for i, p := range allPools {
+	// 它必须不处理分配且不调用任何运行时函数。
 
-		// 解除引用
-		allPools[i] = nil
+	// 由于此时是 STW，不存在用户态代码能尝试读取 localPool，进而所有的 P 都已固定（与 goroutine 绑定）
 
-		// 遍历 p.localSize 数组
-		for i := 0; i < int(p.localSize); i++ {
+	// 从所有的 oldPols 中删除 victim
+	for _, p := range oldPools {
+		p.victim = nil
+		p.victimSize = 0
+	}
 
-			// 获取 poolLocal
-			l := indexLocal(p.local, i)
+	// 将主缓存移动到 victim 缓存
+	for _, p := range allPools {
+		p.victim = p.local
+		p.victimSize = p.localSize
 
-			// 清理 private 和 shared 区域
-			l.private = nil
-			for j := range l.shared {
-				l.shared[j] = nil
-			}
-			l.shared = nil
-		}
-
-		// 设置 p.local = nil 除解引用之外的数组空间
-		// 同时 p.pinSlow 方法会将其重新添加到 allPool
 		p.local = nil
 		p.localSize = 0
 	}
 
-	// 重置 allPools，需要所有 p.pinSlow 重新添加
-	allPools = []*Pool{}
+	// 具有非空主缓存的池现在具有非空的 victim 缓存，并且没有任何 pool 具有主缓存。
+	oldPools, allPools = allPools, nil
 }
 
 var (
 	allPoolsMu Mutex
-	allPools   []*Pool
+
+	// allPools 是一组 pool 的集合，具有非空主缓存。
+	// 有两种形式来保护它的读写：1. allPoolsMu 锁; 2. STW.
+	allPools []*Pool
+
+	// oldPools 是一组 pool 的集合，具有非空 victim 缓存。由 STW 保护
+	oldPools []*Pool
 )
 
 // 将缓存清理函数注册到运行时 GC 时间段

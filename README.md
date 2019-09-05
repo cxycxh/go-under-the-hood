@@ -1,162 +1,72 @@
-<img src="book/images/cover.png" alt="logo" height="550" align="right" />
+<div align="center">
+<img src="book/assets/header.png" alt="logo" />
+<br/><br/>
+<a href="./README.en-us.md"><img src="https://img.shields.io/badge/lang-English-blue.svg?longCache=true&style=flat-square" alt="en-us"/></a>
+<a href="./README.md"><img src="https://img.shields.io/badge/lang-简体中文-red.svg?longCache=true&style=flat-square" alt="zh-cn"/></a>
+<a href="./LICENSE"><img src="https://img.shields.io/github/license/changkun/go-under-the-hood.svg?style=flat-square"/></a>
+<a href="./LICENSE"><img src="https://img.shields.io/badge/license-CC%20BY--NC--ND%204.0-lightgrey.svg?style=flat-square"/></a>
+<a href="https://www.paypal.me/changkunde/4.99eur"><img src="https://img.shields.io/badge/donate-PayPal-104098.svg?style=popout-square&logo=PayPal"/></a>
+<a href="https://t.me/joinchat/FEeulA4zgj2DsBbudBqMcQ"><img src="https://img.shields.io/badge/chat-telegram-%232CA5E0.svg?logo=telegram&logoColor=white&style=flat-square"/></a>
+<br/><br/>
+<p>Go 语言源码研究 | 基于 <code>go1.13</code></p>
+</div>
 
-# Go under the hood
+---
 
-Go 源码研究 | 当前基于 `go1.12`
+<img src="book/assets/cover-cn.png" alt="logo" height="550" align="right" />
 
-[TOC]
+## 致读者
 
-## 目录
+Go 语言从 2009 年诞生之初已有十年的历史。
+在这十年的过程中，Go 语言的热度逐渐上升，Go 语言团队也在持续不断的每隔六个月的时间就发布一个全新的 Go 版本。
+纵观大多数编程语言的历史进程，令人惊讶的是 Go 语言自身在进化的这十年间，
+语言本身并未发生太大变化，Go 语言的用户能够持续不断写出向后兼容的应用。
+从语言设计的角度而言，作为一门从诞生之初就考虑低成本高并发、简洁等原则的语言，
+很难让人不对其简洁设计背后的各项实现机制以及具体工作原理所好奇。
+本书就是一本关于 Go 语言源码分析的书籍。
 
-### [引言](book/preface.md)
+读者可能会好奇，设计总在演进、源码总在变化，为什么要费力气研究实际工作中可能永远不会接触的源码？
+笔者以为不然，因为 "软件工程发生在代码被非原作者阅读之时"，
+在阅读源码的过程中，我们除了能进一步加深对语言本身的理解，
+更重要的则是理解某个设计背后所使用的根本原理，以及当其他人在实现这个设计的过程中发生的工程实践与技巧。
 
-### 第一部分: 基础
+另外也能会有读者问，源码分析的文章这么多，为什么还要专门写关于源码分析的书？
+一个很重要的原因在于笔者在开始阅读 Go 源码并查阅部分资料时，
+发现已经存在的资料大多已经存在一定程度上的过时，同时在分析源码的过程中并没有
+细致到介绍某段代码的的产生背景、相关知识以及发展历程。
+而且 Go 运行时的开发是相当活跃的，因此笔者希望能够通过自己阅读源码这个过程，
+在了解到最新版本的动态的同时，也能对整个 Go 源码的演进历史有一定了解。
 
-#### 第一章 程序基础
+## 组织结构
 
-<!-- 内存布局？ -->
+本书内容涵盖整个 Go 语言的核心源码，这包括但不限于用户端能直接接触的 Go 运行时 `runtime`、与关键语言特性相关的编译器 `cmd/compile`、
+诸多重要的标准库 `sync`/`reflect`/`errors` 等等。
+在极少数情况下，本书会讨论不同平台下的实现差异，主要以 Linux/Darwin amd64，以及 Go 1.11 中引入的 WebAssembly 为主。
 
-#### 第二章 并行与并发计算
+本书共分为四个部分，第一部分简要回顾了与 Go 运行时及编译器相关的基础理论，并在其最后一章中简要讨论了 Go 程序的生命周期。
+第二部分着重关注 Go 的运行时机制，这包括调度器、内存分配器、垃圾回收期、调试机制以及程序的 ABI 等。
+第三部分则着眼于 Go 的编译器机制，包括 Go 编译器对关键字的翻译行为，对 cgo 程序的翻译过程，以及链接器等。
+最后一个部分则讨论了一些依赖运行时和编译器的标准库，本书只介绍这些标准库与运行时和编译器之间的配合，并不会完整的整个包的源码进行分析。
 
-<!-- - [3.1 并发] -->
+## 开始阅读
 
-#### 第三章 排队与调度理论
+- [🇨🇳 简体中文](./book/zh-cn/TOC.md)
+- 🇬🇧 English (Unplanned)
 
-<!-- - [2.1 排队理论引导]()
-- [2.2 工作窃取调度](papers/sched/work-steal-sched.md)
-- [调度理论](book/4-sched/theory.md) -->
+## 致谢
 
-#### 第四章 内存管理工程
+作者的时间和语言技能均有限。因此如果读者在阅读本书的过程中发现任何错误或可提升的语言表述，欢迎您提交 [Issues](https://github.com/changkun/go-under-the-hood/issues/new/choose) 或 [Pull request](https://github.com/changkun/go-under-the-hood/pulls)，
+其具体细节请参考[如何参与贡献](./CONTRIBUTING.md)。
+如果您想要关注本仓库的更新情况，可以点击仓库的 `Watch`。如果您喜欢本书，我们也非常高兴能够收到您的 `Star`。
 
-- 垃圾回收统一理论
+作者特别希望感谢 [@egonelbre](https://github.com/egonelbre/gophers) 所提供的 gopher 图片设计。
 
-<!-- CPU 架构与操作系统? -->
+---
 
-<!-- - [Linux 系统调用]
-- [Plan 9 汇编](book/appendix/asm.md) -->
+<div align="center">
+<p></p>
+<p><a href="https://github.com/changkun/go-under-the-hood">Go under the hood</a> &copy; 2018 - 2019 <a href="https://changkun.de">Changkun Ou</a></p>
+</div>
 
-#### [第五章 Go 程序生命周期](book/part1basic/ch05boot)
 
-- [程序引导](book/part1basic/ch05boot/boot.md)
-- [初始化概览](book/part1basic/ch05boot/init.md)
-- [主 goroutine](book/part1basic/ch05boot/main.md)
 
-### [第二部分：运行时机制](book/part2runtime)
-
-#### [第六章 调度器](book/part2runtime/ch06sched)
-
-- [基本结构](book/part2runtime/ch06sched/basic.md)
-- [调度器初始化](book/part2runtime/ch06sched/init.md)
-- [调度循环](book/part2runtime/ch06sched/exec.md)
-- [系统监控](book/part2runtime/ch06sched/sysmon.md)
-- [线程管理](book/part2runtime/ch06sched/thread.md)
-- [信号处理机制](book/part2runtime/ch06sched/signal.md)
-- [执行栈管理](book/part2runtime/ch06sched/stack.md)
-- [协作与抢占](book/part2runtime/ch06sched/preemptive.md)
-- [`note` 与 `mutex`](book/part2runtime/ch06sched/note.md)
-- [过去、现在与未来](book/part2runtime/ch06sched/history.md)
-
-#### [第七章 内存分配器](book/part2runtime/ch07alloc)
-
-- [基本知识](book/part2runtime/ch07alloc/basic.md)
-- [组件](book/part2runtime/ch07alloc/component.md)
-- [初始化](book/part2runtime/ch07alloc/init.md)
-- [大对象分配](book/part2runtime/ch07alloc/largealloc.md)
-- [小对象分配](book/part2runtime/ch07alloc/smallalloc.md)
-- [微对象分配](book/part2runtime/ch07alloc/tinyalloc.md)
-- [内存统计](book/part2runtime/ch07alloc/mstats.md)
-- [过去、现在与未来](book/part2runtime/ch07alloc/history.md)
-
-#### [第八章 垃圾回收器](book/part2runtime/ch08GC)
-
-- [基本知识](book/part2runtime/ch08GC/basic.md)
-- [初始化](book/part2runtime/ch08GC/init.md)
-- [屏障](book/part2runtime/ch08GC/barrier.md)
-- [三色标记](book/part2runtime/ch08GC/tricolor.md)
-- [并发回收](book/part2runtime/ch08GC/concurrent.md)
-- [标记过程](book/part2runtime/ch08GC/mark.md)
-- [清扫过程](book/part2runtime/ch08GC/sweep.md)
-- [存活与终结](book/part2runtime/ch08GC/finalizer.md)
-- [过去、现在与未来](book/part2runtime/ch08GC/history.md)
-
-#### 第九章 调试
-
-- [race 竞争检测](book/part2runtime/ch09debug/race.md)
-- [trace 运行时调试](book/part2runtime/ch09debug/trace.md)
-
-#### 第十章 兼容与契约
-
-<!-- - [运行时编程综述](gosrc/runtime/README.md) -->
-
-- [参与运行时的系统调用: Linux](book/part2runtime/ch10abi/syscall-linux.md)
-- [参与运行时的系统调用: Darwin](book/part2runtime/ch10abi/syscall-darwin.md)
-- [cgo](book/part2runtime/ch10abi/cgo.md)
-- [WebAssembly](book/part2runtime/ch10abi/wasm.md)
-
-### [第三部分：编译系统](book/part3compile)
-
-#### 第十一章 关键字
-
-- [`go`](book/part3compile/ch11keyword/go.md)
-- [`defer`](book/part3compile/ch11keyword/defer.md)
-- [`panic` 与 `recover`](book/part3compile/ch11keyword/panic.md)
-- [`map`](book/part3compile/ch11keyword/map.md)
-- [`chan` 与 `select`](book/part3compile/ch11keyword/chan.md)
-- [`interface`](book/part3compile/ch11keyword/interface.md)
-
-#### 第十二章 模块链接器
-
-- [初始化](book/part3compile/ch12link/init.md)
-- [模块链接](book/part3compile/ch12link/link.md)
-
-#### 第十三章 编译器
-
-- [`unsafe`](book/part3compile/ch13gc/9-unsafe.md)
-- [词法与文法](book/part3compile/ch13gc/parse.md)
-- [类型系统](book/part3compile/ch13gc/type.md)
-- [编译后端 SSA](book/part3compile/ch13gc/ssa.md)
-- [过去、现在与未来]
-
-### [第四部分：标准库](book/part4lib)
-
-#### [第十四章 sync 与 atomic 包](book/part4lib/ch14sync)
-
-- [信号量 sema 机制](book/part4lib/ch14sync/sema.md)
-- [`sync.Pool`](book/part4lib/ch14sync/pool.md)
-- [`sync.Once`](book/part4lib/ch14sync/once.md)
-- [`sync.Map`](book/part4lib/ch14sync/map.md)
-- [`sync.WaitGroup`](book/part4lib/ch14sync/waitgroup.md)
-- [`sync.Mutex`](book/part4lib/ch14sync/mutex.md)
-- [`sync.Cond`](book/part4lib/ch14sync/cond.md)
-- [`sync/atomic.*`](book/part4lib/ch14sync/atomic.md)
-
-#### [第十五章 其他](book/part4lib/ch15other)
-
-- [`syscall.*`](book/part4lib/ch15other/syscall.md)
-- [`os/signal.*`](book/part4lib/ch15other/signal.md)
-- [`reflect.*`](book/part4lib/ch15other/reflect.md)
-- [`net.*`](book/part4lib/ch15other/net.md)
-- [`time.*`](book/part4lib/ch15other/time.md)
-
-### [结束语](book/finalwords.md)
-
-### [参考文献](book/bibliography.md)
-
-### 附录
-
-- [附录A: 源码索引](book/appendix/index.md)
-- [附录B: 术语表](book/appendix/glossary.md)
-
-## 捐助
-
-您的捐助将用于帮助我购买一台 [MacBook Pro](https://www.apple.com/de/macbook-pro/)：
-
-[![](https://img.shields.io/badge/%E6%8D%90%E5%8A%A9-PayPal-104098.svg?style=popout-square&logo=PayPal)](https://www.paypal.me/ouchangkun/4.99eur)
-
-## Acknowledgement
-
-The author would like to thank [@egonelbre](https://github.com/egonelbre/gophers) for his charming gopher design.
-
-## 许可
-
-[Go under the hood](https://github.com/changkun/go-under-the-hood) | CC-BY-NC-ND 4.0 & MIT &copy; [changkun](https://changkun.de)
