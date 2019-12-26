@@ -1,4 +1,9 @@
-# 11.5 关键字: chan 与 select
+---
+weight: 3105
+title: "11.5 chan 与 select"
+---
+
+# 11.5 chan 与 select
 
 [TOC]
 
@@ -41,7 +46,7 @@ ch <- v
 
 直观上我们很好理解他们之间的差异，
 对于 buffered channel 而言，内部有一个缓冲队列，数据会优先进入缓冲队列，而后被消费，即 `ch <- v` < `v <- ch`；
-对于 unbuffered channel 而言，内部没有缓冲队列，`v <- ch` 会一直阻塞到 `ch <- v` 执行完毕，因此 `ch <- v` > `v <- ch`
+对于 unbuffered channel 而言，内部没有缓冲队列，`v <- ch` 会一直阻塞到 `ch <- v` 执行完毕，因此 `ch <- v` > `v <- ch`（注意，`<`: happens before; `>`: happens after）。
 
 Go 内建了 `close()` 函数来关闭一个 channel，但：
 
@@ -335,11 +340,12 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 	mysg := acquireSudog()
 	(...)
 	c.sendq.enqueue(mysg)
-	goparkunlock(&c.lock, waitReasonChanSend, traceEvGoBlockSend, 3) // 将当前的 g 从调度队列移出
+	gopark(chanparkcommit, unsafe.Pointer(&c.lock), waitReasonChanSend, traceEvGoBlockSend, 2) // 将当前的 g 从调度队列移出
 
 	// 因为调度器在停止当前 g 的时候会记录运行现场，当恢复阻塞的发送操作时候，会从此处继续开始执行
 	(...)
 	gp.waiting = nil
+	gp.activeStackChans = false
 	if gp.param == nil {
 		if c.closed == 0 { // 正常唤醒状态，goroutine 应该包含需要传递的参数，但如果没有唤醒时的参数，且 channel 没有被关闭，则为虚假唤醒
 			throw("chansend: spurious wakeup")
@@ -350,6 +356,12 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 	(...)
 	mysg.c = nil // 取消与之前阻塞的 channel 的关联
 	releaseSudog(mysg) // 从 sudog 中移除
+	return true
+}
+func chanparkcommit(gp *g, chanLock unsafe.Pointer) bool {
+	// 具有未解锁的指向 gp 栈的 sudog。栈的复制必须锁住那些 sudog 的 channel
+	gp.activeStackChans = true
+	unlock((*mutex)(chanLock))
 	return true
 }
 ```
@@ -434,10 +446,26 @@ func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool)
 	// 此处的 c.closed 必须在条件判断之后进行验证（从而需要 atomic 操作），因为
 	// 如果指令重排后，如果先判断 c.closed，得出 channel 未关闭，无法判断失败条件中
 	// channel 是已关闭还是未关闭，从而得到错误的返回值（原本为 true, false，错误的返回了 false, false）
-	if !block && (c.dataqsiz == 0 && c.sendq.first == nil ||
-		c.dataqsiz > 0 && atomic.Loaduint(&c.qcount) == 0) &&
-		atomic.Load(&c.closed) == 0 {
-		return
+	if !block && empty(c) {
+		// 
+		if atomic.Load(&c.closed) == 0 {
+			// 因为一个 channel 关闭后不能被重新打开，所以现在对 channel 的观察
+			// 是 channel 没有关闭，则隐含了之前的 channel 也没有关闭。
+			//因此此时表现为我们观察到那个状态的 channel 为空，且不能继续接受数据
+			return 
+		}
+		// channel 已经被不可逆的关闭了，重新检查 channel 是否包含可能发生在
+		// 前面 empty 和 closed 检查之后的任何需要接受的数据。当这种情况的 send 发生时，
+		// 还要求顺序一致性
+		//
+		// 这里是对从一个已经关闭的 channel 上接受数据的一种优化。
+		if empty(c) {
+			// channel 被不可逆的关闭且清空了
+			if ep != nil {
+				typedmemclr(c.elemtype, ep)
+			}
+			return true, false
+		}
 	}
 
 	(...)
@@ -488,7 +516,7 @@ func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool)
 	mysg := acquireSudog()
 	(...)
 	c.recvq.enqueue(mysg)
-	goparkunlock(&c.lock, waitReasonChanReceive, traceEvGoBlockRecv, 3)
+	gopark(chanparkcommit, unsafe.Pointer(&c.lock), waitReasonChanReceive, traceEvGoBlockRecv, 2)
 
 	(...)
 	// 唤醒
@@ -499,6 +527,15 @@ func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool)
 	mysg.c = nil
 	releaseSudog(mysg)
 	return true, !closed
+}
+// empty 报告从一个 channel 中读是否会发生阻塞（即 channel 为空）
+// 它使用了一个可变状态的原子读。
+func empty(c *hchan) bool {
+	// c.dataqsiz 是不可变的
+	if c.dataqsiz == 0 {
+		return atomic.Loadp(unsafe.Pointer(&c.sendq.first)) == nil
+	}
+	return atomic.Loaduint(&c.qcount) == 0
 }
 ```
 
@@ -929,13 +966,26 @@ func selectnbsend(c *hchan, elem unsafe.Pointer) (selected bool) {
 我们现在来关注 chansend 中当 block 为 `false` 的情况：
 
 ```go
+// full 判断向一个 channel 发送消息时是否会发生阻塞（即 channel 满）
+// 它使用了一个可变状态的单字读（single word-sized read），所以尽管结果立刻返回
+// true，正确的结果可能会在调用函数后发生改变。
+func full(c *hchan) bool {
+	// c.dataqsiz 在 channel 被创建后是不可变的
+	// 因此任何时间的读取操作都是安全的
+	if c.dataqsiz == 0 {
+		// 假设指针的读为 relaxed-atomic
+		return c.recvq.first == nil
+	}
+	// 假设 uint 的读为 relaxed-atomic
+	return c.qcount == c.dataqsiz
+}
+
 func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 
 	(...)
 
 	// 快速路径: 检查不需要加锁时失败的非阻塞操作
-	if !block && c.closed == 0 && ((c.dataqsiz == 0 && c.recvq.first == nil) ||
-		(c.dataqsiz > 0 && c.qcount == c.dataqsiz)) {
+	if !block && c.closed == 0 && full(c) {
 		return false
 	}
 
@@ -1159,6 +1209,7 @@ channel 的实现是一个典型的环形队列+mutex锁的实现，与 channel 
 - [Randall, 2015b] [Keith Randall, runtime: simplify chan ops, take 2, 2015](https://go-review.googlesource.com/c/go/+/16740)
 - [OneOfOne, 2016] [OneOfOne, A scalable lock-free channel, 2016](https://github.com/OneOfOne/lfchan)
 - [Gjengset, 2016] [Jon Gjengset, Fix poor scalability to many (true-SMP) cores, 2016](https://github.com/OneOfOne/lfchan/issues/3)
+- [Chenebault, 2017] [Benjamin Chenebault, runtime: select is not fair](https://github.com/golang/go/issues/21806)
 - [Bell Labs, 1980] [Bell Labs, Verifying Multi-threaded Software with Spin, 1980](http://spinroot.com/spin/whatispin.html)
 ## 许可
 

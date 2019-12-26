@@ -1,19 +1,18 @@
 <div align="center">
 <img src="book/assets/header.png" alt="logo" />
-<br/><br/>
-<a href="./README.en-us.md"><img src="https://img.shields.io/badge/lang-English-blue.svg?longCache=true&style=flat-square" alt="en-us"/></a>
-<a href="./README.md"><img src="https://img.shields.io/badge/lang-简体中文-red.svg?longCache=true&style=flat-square" alt="zh-cn"/></a>
-<a href="./LICENSE"><img src="https://img.shields.io/github/license/changkun/go-under-the-hood.svg?style=flat-square"/></a>
-<a href="./LICENSE"><img src="https://img.shields.io/badge/license-CC%20BY--NC--ND%204.0-lightgrey.svg?style=flat-square"/></a>
-<a href="https://www.paypal.me/changkunde/4.99eur"><img src="https://img.shields.io/badge/donate-PayPal-104098.svg?style=popout-square&logo=PayPal"/></a>
-<a href="https://t.me/joinchat/FEeulA4zgj2DsBbudBqMcQ"><img src="https://img.shields.io/badge/chat-telegram-%232CA5E0.svg?logo=telegram&logoColor=white&style=flat-square"/></a>
-<br/><br/>
-<p>Go 语言源码研究 | 基于 <code>go1.13</code></p>
 </div>
 
----
-
 <img src="book/assets/cover-cn.png" alt="logo" height="550" align="right" />
+
+# Go 语言原本
+
+内容基于 `go1.13`
+
+![](https://img.shields.io/badge/lang-简体中文-red.svg?longCache=true&style=flat-square)
+![](https://img.shields.io/github/license/changkun/go-under-the-hood.svg?style=flat-square)
+![](https://img.shields.io/badge/license-CC%20BY--NC--ND%204.0-lightgrey.svg?style=flat-square)
+[![](https://img.shields.io/badge/donate-PayPal-104098.svg?style=popout-square&logo=PayPal)](https://www.paypal.me/changkunde/4.99eur)
+[![](https://img.shields.io/badge/chat-telegram-%232CA5E0.svg?logo=telegram&logoColor=white&style=flat-square)](https://t.me/joinchat/FEeulA4zgj2DsBbudBqMcQ)
 
 ## 致读者
 
@@ -50,8 +49,8 @@ Go 语言从 2009 年诞生之初已有十年的历史。
 
 ## 开始阅读
 
-- [🇨🇳 简体中文](./book/zh-cn/TOC.md)
-- 🇬🇧 English (Unplanned)
+- [Github 在线](https://github.com/changkun/go-under-the-hood/blob/master/book/zh-cn/TOC.md)
+- [网站](https://changkun.de/golang/)
 
 ## 致谢
 
@@ -59,14 +58,8 @@ Go 语言从 2009 年诞生之初已有十年的历史。
 其具体细节请参考[如何参与贡献](./CONTRIBUTING.md)。
 如果您想要关注本仓库的更新情况，可以点击仓库的 `Watch`。如果您喜欢本书，我们也非常高兴能够收到您的 `Star`。
 
-作者特别希望感谢 [@egonelbre](https://github.com/egonelbre/gophers) 所提供的 gopher 图片设计。
+作者特别希望感谢 [@egonelbre](https://github.com/egonelbre/gophers) 所提供的 gopher 图片设计，以及 [Hugo Book Theme](https://github.com/alex-shpak/hugo-book) 项目。
 
----
+## 许可
 
-<div align="center">
-<p></p>
-<p><a href="https://github.com/changkun/go-under-the-hood">Go under the hood</a> &copy; 2018 - 2019 <a href="https://changkun.de">Changkun Ou</a></p>
-</div>
-
-
-
+[Go under the hood](https://github.com/changkun/go-under-the-hood) | CC-BY-NC-ND 4.0 & MIT &copy; [changkun](https://changkun.de)

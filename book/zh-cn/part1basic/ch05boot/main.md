@@ -1,4 +1,9 @@
-# Go 程序生命周期：主 goroutine
+---
+weight: 1502
+title: "5.3 主 goroutine"
+---
+
+# 5.3 主 goroutine
 
 [TOC]
 

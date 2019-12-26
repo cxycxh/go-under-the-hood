@@ -1,3 +1,9 @@
+---
+weight: 4102
+title: "15.2 errors 包与错误检查"
+---
+
+
 # 15.2 `errors` 包与错误检查
 
 在 Go 1.13 以前，标准库中的 error 包仅包含一个 `New` 函数：
@@ -84,11 +90,15 @@ func Is(err, target error) bool {
 可见 `errors.Is` 方法的目的是替换如下形式的错误检查：
 
 ```go
-if err == io.ErrUnexpectedEOF
+if err == io.ErrUnexpectedEOF {
+	// ... 处理错误
+}
 
 =>
 
-if errors.Is(err, io.ErrUnexpectedEOF)
+if errors.Is(err, io.ErrUnexpectedEOF) {
+	// ... 处理错误
+}
 ```
 
 `As` 的实现与 `Is` 基本相同，不同之处在于 `As` 的目的是将某个 err 给拆封到 target 中，因此对于一个
@@ -129,12 +139,16 @@ var errorType = reflectlite.TypeOf((*error)(nil)).Elem()
 由于错误链的存在， `errors.As` 方法的目的是替换如下形式的错误检查：
 
 ```go
-if e, ok := err.(*os.PathError); ok
+if e, ok := err.(*os.PathError); ok {
+	// ... 处理错误
+}
 
 =>
 
 var e *os.PathError
-if errors.As(err, &e)
+if errors.As(err, &e) {
+	// ... 处理错误
+}
 ```
 
 ### fmt.Errorf 中的 `%w`

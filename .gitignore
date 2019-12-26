@@ -277,3 +277,8 @@ TSWLatexianTemp*
 
 # standalone packages
 *.sta
+
+# Hugo website
+website/resources
+website/content
+website/public

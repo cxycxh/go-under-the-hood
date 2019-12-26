@@ -303,6 +303,7 @@ func getHugePageSize() uintptr {
 func osinit() {
 	ncpu = getproccount()
 	physHugePageSize = getHugePageSize()
+	osArchInit()
 }
 
 var urandom_dev = []byte("/dev/urandom\x00")
@@ -332,11 +333,20 @@ func libpreinit() {
 	initsig(true)
 }
 
+// gsignalInitQuirk, if non-nil, is called for every allocated gsignal G.
+//
+// TODO(austin): Remove this after Go 1.15 when we remove the
+// mlockGsignal workaround.
+var gsignalInitQuirk func(gsignal *g)
+
 // 调用此方法来初始化一个新的 m (包含引导 m)
 // 从一个父线程上进行调用（引导时为主线程），可以分配内存
 func mpreinit(mp *m) {
 	mp.gsignal = malg(32 * 1024) // Linux 需要 >= 2K
 	mp.gsignal.m = mp
+	if gsignalInitQuirk != nil {
+		gsignalInitQuirk(mp.gsignal)
+	}
 }
 
 func gettid() uint32
@@ -346,7 +356,9 @@ func gettid() uint32
 func minit() {
 	minitSignals()
 
-	// for debuggers, in case cgo created the thread
+	// Cgo-created threads and the bootstrap m are missing a
+	// procid. We need this for asynchronous preemption and its
+	// useful in debuggers.
 	getg().m.procid = uint64(gettid())
 }
 
@@ -385,6 +397,10 @@ func raiseproc(sig uint32)
 //go:noescape
 func sched_getaffinity(pid, len uintptr, buf *byte) int32
 func osyield()
+
+func pipe() (r, w int32, errno int32)
+func pipe2(flags int32) (r, w int32, errno int32)
+func setNonblock(fd int32)
 
 //go:nosplit
 //go:nowritebarrierrec
@@ -466,3 +482,11 @@ func sysSigaction(sig uint32, new, old *sigactiont) {
 // rt_sigaction 由汇编实现
 //go:noescape
 func rt_sigaction(sig uintptr, new, old *sigactiont, size uintptr) int32
+
+func getpid() int
+func tgkill(tgid, tid, sig int)
+
+// signalM sends a signal to mp.
+func signalM(mp *m, sig int) {
+	tgkill(getpid(), int(mp.procid), sig)
+}

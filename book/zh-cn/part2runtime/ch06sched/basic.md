@@ -1,9 +1,13 @@
-# 调度器: 基本知识
+---
+weight: 2101
+title: "6.1 基本知识"
+---
+
+# 6.1 基本知识
 
 [TOC]
 
-在详细进入代码之前，我们需要提前了解一下调度器的设计原则及一些基本概念来建立对调度器较为宏观的认识。
-
+我们需要提前了解一下调度器的设计原则及一些基本概念来建立对调度器较为宏观的认识。
 理解调度器涉及的主要概念包括以下三个：
 
 - G: **G**oroutine，即我们在 Go 程序中使用 `go` 关键字创建的执行体；
@@ -174,8 +178,10 @@ type m struct {
 	waitlock      unsafe.Pointer
 	(...)
 	syscalltick   uint32
-	thread        uintptr // 线程处理
-	freelink      *m      // 在 sched.freem 上
+	freelink      *m // 在 sched.freem 上
+	(...)
+	// preemptGen 记录了完成的抢占信号，用于检测一个抢占失败次数，原子递增
+	preemptGen uint32
 	(...)
 }
 ```
@@ -198,11 +204,13 @@ P 只是处理器的抽象，而非处理器本身，它存在的意义在于实
 在没有 P 的情况下，所有的 G 只能放在一个全局的队列中。
 当 M 执行完 G 而没有 G 可执行时，必须将队列锁住从而取值。
 
-当引入了 P 之后，P 持有 G 的本地队列，而持有 P 的 M 执行完 G 后在 P 本地队列中没有发现其他 G 可以执行时，
-会从其他的 P 的本地队列偷取（steal）一个 G 来执行，只有在所有的 P 都偷不到的情况下才去全局队列里面取。
+当引入了 P 之后，P 持有 G 的本地队列，而持有 P 的 M 执行完 G 后在 P 本地队列中没有
+发现其他 G 可以执行时，虽然仍然会先检查全局队列、网络，但这时增加了一个从其他 P 的
+队列偷取（steal）一个 G 来执行的过程。优先级为本地 > 全局 > 网络 > 偷取。
 
 一个不恰当的比喻：银行服务台排队中身手敏捷的顾客，当一个服务台队列空（没有人）时，
-马上会有在其他队列排队的顾客迅速跑到这个没人的服务台来，这就是所谓的偷取。
+没有在排队的顾客（全局）会立刻跑到该窗口，当彻底没人时在其他队列排队的顾客才会迅速
+跑到这个没人的服务台来，即所谓的偷取。
 
 ```go
 type p struct {
@@ -214,6 +222,7 @@ type p struct {
 	sysmontick  sysmontick // 系统监控观察到的最后一次记录
 	m           muintptr   // 反向链接到关联的 m （nil 则表示 idle）
 	mcache      *mcache
+	pcache      pageCache
 	(...)
 
 	deferpool    [5][]*_defer // 不同大小的可用的 defer 结构池 (见 panic.go)
@@ -245,6 +254,17 @@ type p struct {
 	sudogcache []*sudog
 	sudogbuf   [128]*sudog
 
+	// Cache of mspan objects from the heap.
+	mspancache struct {
+		// We need an explicit length here because this field is used
+		// in allocation codepaths where write barriers are not allowed,
+		// and eliminating the write barrier/keeping it eliminated from
+		// slice updates is tricky, moreso than just managing the length
+		// ourselves.
+		len int
+		buf [128]*mspan
+	}
+
 	(...)
 
 	palloc persistentAlloc // per-P，用于避免 mutex
@@ -268,7 +288,30 @@ type p struct {
 	wbBuf wbBuf
 
 	runSafePointFn uint32 // 如果为 1, 则在下一个 safe-point 运行 sched.safePointFn
-	(...)
+
+	// Lock for timers. We normally access the timers while running
+	// on this P, but the scheduler can also do it from a different P.
+	timersLock mutex
+
+	// Actions to take at some time. This is used to implement the
+	// standard library's time package.
+	// Must hold timersLock to access.
+	timers []*timer
+
+	// Number of timerModifiedEarlier timers on P's heap.
+	// This should only be modified while holding timersLock,
+	// or while the timer status is in a transient state
+	// such as timerModifying.
+	adjustTimers uint32
+
+	// Race context used while executing timer functions.
+	timerRaceCtx uintptr
+
+	// preempt is set to indicate that this P should be enter the
+	// scheduler ASAP (regardless of what G is running on it).
+	preempt bool
+
+	pad cpu.CacheLinePad
 }
 ```
 
@@ -292,29 +335,40 @@ type g struct {
 	// 在其他栈上值为 ~0 用于触发 morestackc (并 crash) 调用
 	stackguard1 uintptr // 偏移量与 liblink 一致
 
-	_panic         *_panic // innermost panic - 偏移量用于 liblink
-	_defer         *_defer // innermost defer
-	m              *m      // 当前的 m; 偏移量对 arm liblink 透明
-	sched          gobuf
-	syscallsp      uintptr        // 如果 status==Gsyscall, 则 syscallsp = sched.sp 并在 GC 期间使用
-	syscallpc      uintptr        // 如果 status==Gsyscall, 则 syscallpc = sched.pc 并在 GC 期间使用
-	stktopsp       uintptr        // 期望 sp 位于栈顶，用于回溯检查
-	param          unsafe.Pointer // wakeup 唤醒时候传递的参数
-	atomicstatus   uint32
-	stackLock      uint32 // sigprof/scang 锁;
-	goid           int64
-	schedlink      guintptr
-	waitsince      int64      // g 阻塞的时间
-	waitreason     waitReason // 如果 status==Gwaiting，则记录等待的原因
-	preempt        bool       // 抢占信号，stackguard0 = stackpreempt 的副本
-	paniconfault   bool       // 发生 fault panic （不崩溃）的地址
-	preemptscan    bool       // 为 gc 进行 scan 的被强占的 g
-	gcscandone     bool       // g 执行栈已经 scan 了；此此段受 _Gscan 位保护
-	gcscanvalid    bool       // 在 gc 周期开始时为 false；当 G 从上次 scan 后就没有运行时为 true
-	throwsplit     bool       // 必须不能进行栈分段
+	_panic        *_panic // innermost panic - 偏移量用于 liblink
+	_defer        *_defer // innermost defer
+	m             *m      // 当前的 m; 偏移量对 arm liblink 透明
+	sched         gobuf
+	syscallsp     uintptr        // 如果 status==Gsyscall, 则 syscallsp = sched.sp 并在 GC 期间使用
+	syscallpc     uintptr        // 如果 status==Gsyscall, 则 syscallpc = sched.pc 并在 GC 期间使用
+	stktopsp      uintptr        // 期望 sp 位于栈顶，用于回溯检查
+	param         unsafe.Pointer // wakeup 唤醒时候传递的参数
+	atomicstatus  uint32
+	stackLock     uint32 // sigprof/scang 锁; TODO: fold in to atomicstatus
+	goid          int64
+	schedlink     guintptr
+	waitsince     int64      // g 阻塞的时间
+	waitreason    waitReason // 如果 status==Gwaiting，则记录等待的原因
+	preempt       bool       // 抢占信号，stackguard0 = stackpreempt 的副本
+	preemptStop   bool       // transition to _Gpreempted on preemption; otherwise, just deschedule
+	preemptShrink bool       // shrink stack at synchronous safe point
+
+	// asyncSafePoint is set if g is stopped at an asynchronous
+	// safe point. This means there are frames on the stack
+	// without precise pointer information.
+	asyncSafePoint bool
+
+	paniconfault bool // 发生 fault panic （不崩溃）的地址
+	gcscandone   bool // g 执行栈已经 scan 了；此此段受 _Gscan 位保护
+	throwsplit   bool // 必须不能进行栈分段
 	(...)
 	sysblocktraced bool       // StartTrace 已经出发了此 goroutine 的 EvGoInSyscall
 	sysexitticks   int64      // 当 syscall 返回时的 cputicks（用于跟踪）
+	// activeStackChans indicates that there are unlocked channels
+	// pointing into this goroutine's stack. If true, stack
+	// copying needs to acquire channel locks to protect these
+	// areas of the stack.
+	activeStackChans bool
 	(...)
 	lockedm        muintptr
 	sig            uint32
@@ -330,7 +384,7 @@ type g struct {
 	cgoCtxt        []uintptr      // cgo 回溯上下文
 	labels         unsafe.Pointer // profiler 的标签
 	timer          *timer         // 为 time.Sleep 缓存的计时器
-	selectDone     uint32         // 我们是否正在参与 select 且某个 goroutine 胜出？
+	selectDone     uint32         // 我们是否正在参与 select 且某个 goroutine 胜出
 
 	// Per-G GC 状态
 
@@ -467,8 +521,6 @@ type muintptr uintptr
 调度器的设计还是相当巧妙的。它通过引入一个 P，巧妙的减缓了全局锁的调用频率，进一步压榨了机器的性能。
 goroutine 本身也不是什么黑魔法，运行时只是将其作为一个需要运行的入口地址保存在了 G 中，
 同时对调用的参数进行了一份拷贝。我们说 P 是处理器自身的抽象，但 P 只是一个纯粹的概念。相反，M 才是运行代码的真身。
-
-[返回目录](./readme.md) | 上一节 | [下一节 调度器初始化](./init.md)
 
 ## 进一步阅读的参考文献
 
